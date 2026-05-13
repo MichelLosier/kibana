@@ -20,8 +20,11 @@ import {
   EuiSpacer,
   EuiButtonEmpty,
   EuiIconTip,
+  EuiFormRow,
+  EuiFieldText,
   useEuiTheme,
 } from '@elastic/eui';
+import { validateAgentConditionExpression } from '@kbn/agent-condition-language';
 
 import type {
   NewPackagePolicyInput,
@@ -36,6 +39,7 @@ import type {
 import type { PackagePolicyInputValidationResults } from '../../../services';
 import type { YamlParseFn } from '../../../services';
 import { hasInvalidButRequiredVar, countValidationErrors, isAdvancedVar } from '../../../services';
+import { ExperimentalFeaturesService } from '../../../../../../services';
 import { useAgentless } from '../../../single_page_layout/hooks/setup_technology';
 import { useYaml } from '../../../../../../../../services';
 import {
@@ -257,6 +261,12 @@ export const PackagePolicyInputPanel: React.FunctionComponent<{
     // Errors state
     const errorCount = inputValidationResults && countValidationErrors(inputValidationResults);
     const hasErrors = forceShowErrors && errorCount;
+
+    const { enableIntegrationConditions } = ExperimentalFeaturesService.get();
+    const conditionErrors = useMemo(
+      () => validateAgentConditionExpression(packagePolicyInput.condition ?? ''),
+      [packagePolicyInput.condition]
+    );
 
     const inputStreams = useMemo(
       () =>
@@ -555,6 +565,42 @@ export const PackagePolicyInputPanel: React.FunctionComponent<{
         hasInputStreams &&
         ((packageInput.vars && packageInput.vars.length) || !shouldConsolidateAdvancedSections) ? (
           <EuiSpacer size="m" />
+        ) : null}
+
+        {/* Integration-level condition field */}
+        {isShowingStreams && enableIntegrationConditions ? (
+          <>
+            <EuiFormRow
+              fullWidth
+              label={i18n.translate(
+                'xpack.fleet.createPackagePolicy.stepConfigure.inputConditionLabel',
+                { defaultMessage: 'Condition' }
+              )}
+              helpText={i18n.translate(
+                'xpack.fleet.createPackagePolicy.stepConfigure.inputConditionHelp',
+                {
+                  defaultMessage:
+                    "Optional agent condition expression. The input runs only when this evaluates to true. Example: $\\{host.platform\\} == 'linux'",
+                }
+              )}
+              isInvalid={conditionErrors.length > 0}
+              error={conditionErrors.map(
+                ({ line, column, message }) => `Line ${line}, col ${column + 1}: ${message}`
+              )}
+            >
+              <EuiFieldText
+                data-test-subj="PackagePolicy.InputCondition"
+                fullWidth
+                value={packagePolicyInput.condition ?? ''}
+                onChange={(e) =>
+                  updatePackagePolicyInput({ condition: e.target.value || undefined })
+                }
+                isInvalid={conditionErrors.length > 0}
+                placeholder="${host.platform} == 'linux'"
+              />
+            </EuiFormRow>
+            <EuiSpacer size="m" />
+          </>
         ) : null}
 
         {/* Input level policy */}
