@@ -1678,6 +1678,7 @@ describe('Output Service', () => {
 
       expect(soClient.update).toBeCalled();
       expect(soClient.update).toBeCalledWith(expect.anything(), expect.anything(), {
+        type: 'logstash',
         is_default: true,
         ca_sha256: null,
         ca_trusted_fingerprint: null,
@@ -2493,7 +2494,6 @@ describe('Output Service', () => {
         type: 'remote_elasticsearch',
         kibana_api_key: null,
         service_token: null,
-        preset: 'balanced',
       });
     });
 
