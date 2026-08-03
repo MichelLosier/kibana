@@ -12,6 +12,8 @@ import { set } from '@kbn/safer-lodash-set';
 
 import {
   getDefaultPresetForEsOutput,
+  isBeatsOutput,
+  isOtlpOutput,
   outputTypeSupportPresets,
 } from '../../../common/services/output_helpers';
 
@@ -170,9 +172,10 @@ export async function getFullAgentPolicy(
 
   let otelcolConfig;
   if (experimentalFeature.enableOtelIntegrations) {
-    const dataOutputProxy = dataOutput?.proxy_id
-      ? proxies.find((p) => p.id === dataOutput.proxy_id)
-      : undefined;
+    const dataOutputProxy =
+      dataOutput && isBeatsOutput(dataOutput) && dataOutput.proxy_id
+        ? proxies.find((p) => p.id === dataOutput.proxy_id)
+        : undefined;
 
     const packageOutputs = new Map<string, Output>();
     for (const pkgPolicy of (agentPolicy.package_policies ?? []) as PackagePolicy[]) {
@@ -244,7 +247,9 @@ export async function getFullAgentPolicy(
       ...outputs.reduce<FullAgentPolicy['outputs']>((acc, output) => {
         acc[getOutputIdForAgentPolicy(output)] = transformOutputToFullPolicyOutput(
           output,
-          output.proxy_id ? proxies.find((proxy) => output.proxy_id === proxy.id) : undefined,
+          isBeatsOutput(output) && output.proxy_id
+            ? proxies.find((proxy) => output.proxy_id === proxy.id)
+            : undefined,
           standalone,
           redactProxySecrets
         );
@@ -363,7 +368,7 @@ export async function getFullAgentPolicy(
 
       // Add logs-* permissions for outputs with write_to_streams enabled
       const originalOutput = outputs.find((o) => getOutputIdForAgentPolicy(o) === outputId);
-      if (originalOutput?.write_to_logs_streams) {
+      if (originalOutput && isBeatsOutput(originalOutput) && originalOutput.write_to_logs_streams) {
         const streamsPermissions = {
           _write_to_logs_streams: {
             indices: [
@@ -553,6 +558,11 @@ export function transformOutputToFullPolicyOutput(
   standalone = false,
   redactProxySecrets = false
 ): FullAgentPolicyOutput {
+  // TODO: OTLP policy compilation is handled in a separate task
+  if (isOtlpOutput(output)) {
+    return { type: output.type };
+  }
+
   const {
     config_yaml,
     type,
