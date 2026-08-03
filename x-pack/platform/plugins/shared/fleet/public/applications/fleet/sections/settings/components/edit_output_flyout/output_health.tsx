@@ -16,6 +16,7 @@ import type { GetOutputHealthResponse } from '../../../../../../../common/types'
 
 import { sendGetOutputHealth, useStartServices } from '../../../../hooks';
 import type { Output } from '../../../../types';
+import { isBeatsOutput } from '../../../../../../../common/services/output_helpers';
 
 interface Props {
   output: Output;
@@ -56,7 +57,7 @@ export const OutputHealth: React.FunctionComponent<Props> = ({ output, showBadge
             defaultMessage: 'Unable to connect to "{name}" at {host}.',
             values: {
               name: output.name,
-              host: output.hosts?.join(',') ?? '',
+              host: (isBeatsOutput(output) ? output.hosts : undefined)?.join(',') ?? '',
             },
           })}
         </p>
