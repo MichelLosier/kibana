@@ -27,6 +27,7 @@ import type {
 } from '../../../common/types';
 import { normalizeHostsForAgents } from '../../../common/services';
 import { isBeatsOutput, isOtelExporterOutput } from '../../../common/services/output_helpers';
+import { outputType } from '../../../common/constants';
 import type { FleetConfigType } from '../../config';
 import {
   DEFAULT_OUTPUT_ID,
@@ -383,9 +384,6 @@ export async function isSecretDifferent(
   }
 }
 
-// TODO: refactor to compare non-secret fields programmatically (strip secrets/id/is_preconfigured,
-// normalize ES hosts, deep-equal the rest) so new output-type fields are covered automatically
-// without having to enumerate them here.
 async function isPreconfiguredOutputDifferentFromCurrent(
   existingOutput: Output,
   preconfiguredOutput: Partial<Output>
@@ -409,7 +407,7 @@ async function isPreconfiguredOutputDifferentFromCurrent(
 
   // OTLP outputs: compare programmatically. TypeScript narrows existingOutput after this branch.
   // Partial<Output> cast is safe given the type-equality check above.
-  if (existingOutput.type === 'otlp') {
+  if (existingOutput.type === outputType.Otlp) {
     const preconfiguredOtlp = preconfiguredOutput as Partial<NewOtlpOutput>;
     const tlsKeyIsDifferent = await isSecretDifferent(
       preconfiguredOtlp.secrets?.otlp_exporter?.tls?.key_pem,
@@ -421,8 +419,6 @@ async function isPreconfiguredOutputDifferentFromCurrent(
     );
   }
 
-  // Beats outputs. TypeScript narrows existingOutput to BeatsOutput after the OTLP return.
-  // Partial<Output> cast is safe: types are confirmed equal and non-OTLP.
   const preconfiguredBeats = preconfiguredOutput as Partial<BeatsOutput>;
 
   const sslKeyHashIsDifferent = await isSecretDifferent(
