@@ -18,8 +18,7 @@ import { createWiredStreamsRoutingProcessor } from './inject_wired_streams_routi
 // Mock the Fleet transformation function
 jest.mock('@kbn/fleet-plugin/server/services/output_client', () => ({
   transformOutputToFullPolicyOutput: jest.fn((output: Output) => ({
-    type: output.type,
-    hosts: output.hosts,
+    ...output,
     api_key: 'test-api-key',
   })),
 }));
