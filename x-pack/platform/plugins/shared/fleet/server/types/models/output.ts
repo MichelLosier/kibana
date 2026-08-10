@@ -356,8 +356,7 @@ const KafkaUpdateSchema = {
 // Validated against otelcol v0.155.0:
 //   gRPC: exporter/otlpexporter/config.go + go.opentelemetry.io/collector/config/configgrpc
 //   HTTP: exporter/otlphttpexporter/config.go + go.opentelemetry.io/collector/config/confighttp
-// Deliberate exclusions: auth/middlewares (extension refs), ca_file/cert_file/key_file (inline PEM
-// only), tls.tpm (hardware credential, revisit on demand), sending_queue.storage (agent-managed).
+// Deliberate exclusions: auth/middlewares (extension refs), sending_queue.storage (agent-managed).
 const OtlpExporterTlsSchema = schema.object({
   insecure: schema.maybe(schema.boolean()),
   insecure_skip_verify: schema.maybe(schema.boolean()),
