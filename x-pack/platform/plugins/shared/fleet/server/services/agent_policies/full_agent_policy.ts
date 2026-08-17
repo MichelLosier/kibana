@@ -10,12 +10,15 @@ import { parse } from 'yaml';
 import deepMerge from 'deepmerge';
 import { set } from '@kbn/safer-lodash-set';
 
+import { PrivilegeType } from '@kbn/apm-types';
+
 import {
   getDefaultPresetForEsOutput,
   isBeatsOutput,
   isOtlpOutput,
   outputTypeSupportPresets,
 } from '../../../common/services/output_helpers';
+import { isManagedOtlpEndpoint } from '../utils/managed_otlp';
 
 import type {
   FullAgentPolicy,
@@ -345,11 +348,12 @@ export async function getFullAgentPolicy(
     cluster: DEFAULT_CLUSTER_PERMISSIONS,
   };
 
-  // Only add permissions if output.type is "elasticsearch"
   fullAgentPolicy.output_permissions = Object.keys(fullAgentPolicy.outputs).reduce<
     NonNullable<FullAgentPolicy['output_permissions']>
   >((outputPermissions, outputId) => {
     const output = fullAgentPolicy.outputs[outputId];
+    const originalOutput = outputs.find((o) => getOutputIdForAgentPolicy(o) === outputId);
+
     if (
       output &&
       (output.type === outputType.Elasticsearch || output.type === outputType.RemoteElasticsearch)
@@ -367,7 +371,6 @@ export async function getFullAgentPolicy(
       }
 
       // Add logs-* permissions for outputs with write_to_streams enabled
-      const originalOutput = outputs.find((o) => getOutputIdForAgentPolicy(o) === outputId);
       if (originalOutput && isBeatsOutput(originalOutput) && originalOutput.write_to_logs_streams) {
         const streamsPermissions = {
           _write_to_logs_streams: {
@@ -383,7 +386,21 @@ export async function getFullAgentPolicy(
       }
 
       outputPermissions[outputId] = permissions;
+    } else if (
+      agentPolicy.supports_agentless &&
+      originalOutput &&
+      isOtlpOutput(originalOutput) &&
+      isManagedOtlpEndpoint(originalOutput.otlp_exporter.endpoint)
+    ) {
+      outputPermissions[outputId] = {
+        _managed_otlp_apm: {
+          applications: [
+            { application: 'apm', privileges: [PrivilegeType.EVENT], resources: ['*'] },
+          ],
+        },
+      };
     }
+
     return outputPermissions;
   }, {});
 
@@ -558,9 +575,11 @@ export function transformOutputToFullPolicyOutput(
   standalone = false,
   redactProxySecrets = false
 ): FullAgentPolicyOutput {
-  // TODO: OTLP policy compilation is handled in a separate task
   if (isOtlpOutput(output)) {
-    return { type: output.type };
+    // otlp_exporter config is compiled into the OTel collector block by generateOtelcolExporter;
+    // all other fields (including secrets for fleet-server secret resolution) pass through.
+    const { otlp_exporter: _, ...rest } = output;
+    return rest;
   }
 
   const {
