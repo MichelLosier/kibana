@@ -7,6 +7,7 @@
 
 import type { StreamsUnit } from '@kbn/streams-schema';
 import { METRIC_UNITS } from './constants';
+import { mapDurationRows, type DurationBucket } from './duration_stats';
 
 interface SumBucket {
   total?: { value: number | null };
@@ -20,6 +21,7 @@ interface DestinationBucket {
     by_outcome?: { buckets: Array<SumBucket & { key: string; doc_count: number }> };
   };
   bytes?: SumBucket & { doc_count: number };
+  duration?: DurationBucket;
 }
 
 export interface DestinationStatsAggregations {
@@ -59,6 +61,8 @@ export const mapDestinationStatsResponse = (
         unit: METRIC_UNITS.bytes,
       });
     }
+
+    rows.push(...mapDurationRows(bucket.duration));
 
     if (rows.length > 0) {
       rowsById.set(String(bucket.key), rows);

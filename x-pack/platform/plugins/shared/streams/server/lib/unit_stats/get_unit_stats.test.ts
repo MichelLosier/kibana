@@ -12,6 +12,8 @@ import type { StreamsUnit } from '@kbn/streams-schema';
 import { buildDestinationStatsRequest } from './build_destination_stats_request';
 import { UNIT_STATS_STREAM } from './constants';
 import { getUnitStats } from './get_unit_stats';
+import { buildProcessorStatsRequest } from './build_processor_stats_request';
+import { mapProcessorStatsResponse } from './map_processor_stats_response';
 import { mapDestinationStatsResponse } from './map_destination_stats_response';
 
 const unit: StreamsUnit.Configuration = {
@@ -196,5 +198,109 @@ describe('getUnitStats', () => {
     const search = jest.fn().mockRejectedValue(error);
     const response = await run({ search }, { resources: [{ kind: 'destination', id: 'es-prod' }] });
     expect(response.results[0].status).toBe(status);
+  });
+});
+
+const durationAgg = {
+  doc_count: 5,
+  avg: { value: 0.008 },
+  max: { value: 0.02 },
+  p95: { values: { '95.0': 0.015 } },
+};
+
+describe('duration rows', () => {
+  it('adds avg, max and p95 to destination rows and omits them when absent', () => {
+    const rows = mapDestinationStatsResponse({
+      by_id: {
+        buckets: [
+          { key: 'es-prod', doc_count: 1, duration: durationAgg },
+          { key: 'es-dev', doc_count: 1, duration: { doc_count: 0 } },
+        ],
+      },
+    });
+    expect(rows.get('es-prod')).toEqual([
+      { name: 'duration', aggregation: 'avg', value: 0.008, unit: 's' },
+      { name: 'duration', aggregation: 'max', value: 0.02, unit: 's' },
+      { name: 'duration', aggregation: 'p95', value: 0.015, unit: 's' },
+    ]);
+    expect(rows.has('es-dev')).toBe(false);
+  });
+});
+
+describe('processor stats', () => {
+  const processorAggregations = {
+    by_id: {
+      buckets: [
+        {
+          key: 'uppercase-message',
+          items: {
+            doc_count: 4,
+            by_direction: {
+              buckets: [
+                {
+                  key: 'in',
+                  by_outcome: { buckets: [{ key: 'success', doc_count: 2, total: { value: 10 } }] },
+                },
+                {
+                  key: 'out',
+                  by_outcome: { buckets: [{ key: 'success', doc_count: 2, total: { value: 9 } }] },
+                },
+              ],
+            },
+          },
+          bytes: { doc_count: 0 },
+          duration: durationAgg,
+        },
+      ],
+    },
+  };
+
+  it('maps direction and outcome dimensions, skips empty bytes and adds duration', () => {
+    const rows = mapProcessorStatsResponse(processorAggregations).get('uppercase-message');
+    expect(rows).toHaveLength(5);
+    expect(rows?.[0]).toEqual({
+      name: 'items',
+      aggregation: 'sum',
+      value: 10,
+      unit: '{item}',
+      dimensions: { direction: 'in', outcome: 'success' },
+    });
+    expect(rows?.some((row) => row.name === 'bytes')).toBe(false);
+  });
+
+  it('filters on the pipeline id only when one is given', () => {
+    const base = {
+      unitId: 'default',
+      window: { start: 'a', end: 'b' },
+      ids: ['uppercase-message'],
+    };
+    expect(JSON.stringify(buildProcessorStatsRequest(base).query)).not.toContain('pipeline.id');
+    expect(
+      JSON.stringify(buildProcessorStatsRequest({ ...base, pipelineId: 'main-route-0' }).query)
+    ).toContain('main-route-0');
+  });
+
+  it('returns ok, and runs one search per distinct placement', async () => {
+    const search = jest
+      .fn()
+      .mockResolvedValueOnce(hashResponse)
+      .mockResolvedValue({ aggregations: processorAggregations });
+    const response = await run(
+      { search },
+      {
+        resources: [
+          { kind: 'processor', id: 'uppercase-message' },
+          { kind: 'processor', id: 'uppercase-message', pipeline_id: 'main' },
+          { kind: 'processor', id: 'missing' },
+        ],
+      }
+    );
+    expect(response.results.map((r) => [r.id, r.status])).toEqual([
+      ['uppercase-message', 'ok'],
+      ['uppercase-message', 'ok'],
+      ['missing', 'not_found'],
+    ]);
+    // hash lookup, all pipelines, and one placement.
+    expect(search).toHaveBeenCalledTimes(3);
   });
 });

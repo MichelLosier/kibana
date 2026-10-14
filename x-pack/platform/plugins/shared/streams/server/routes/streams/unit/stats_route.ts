@@ -51,7 +51,9 @@ export const getStreamsUnitStatsRoute = createServerRoute({
     return await getUnitStats({
       unitId: params.path.id,
       unit,
-      request: params.body,
+      // The route repository strips empty plain objects from the validated params,
+      // so a `{}` body arrives as `undefined`. Treat it as the empty request.
+      request: params.body ?? {},
       esClient: scopedClusterClient.asCurrentUser,
       logger,
     });

@@ -8,6 +8,7 @@
 import type { estypes } from '@elastic/elasticsearch';
 import {
   DESTINATION_BYTES_FIELD,
+  DESTINATION_DURATION_FIELD,
   DESTINATION_ID_FIELD,
   DESTINATION_ITEMS_FIELD,
   MAX_OUTCOME_BUCKETS,
@@ -15,6 +16,7 @@ import {
   UNIT_STATS_QUERY_TIMEOUT,
   UNIT_STATS_STREAM,
 } from './constants';
+import { buildDurationAggregations } from './duration_stats';
 import { buildUnitFilter, type StatsWindow } from './resolve_config_hash';
 
 /**
@@ -64,6 +66,7 @@ export const buildDestinationStatsRequest = ({
           filter: { exists: { field: DESTINATION_BYTES_FIELD } },
           aggs: { total: { sum: { field: DESTINATION_BYTES_FIELD } } },
         },
+        ...buildDurationAggregations(DESTINATION_DURATION_FIELD),
       },
     },
   },

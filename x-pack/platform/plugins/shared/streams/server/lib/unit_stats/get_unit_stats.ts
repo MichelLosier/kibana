@@ -10,6 +10,11 @@ import type { ElasticsearchClient, Logger } from '@kbn/core/server';
 import { STREAMS_UNIT_STATS_MAX_RESOURCES, type StreamsUnit } from '@kbn/streams-schema';
 import { DESTINATION_TYPES_WITH_STATS, UNIT_STATS_WINDOW_MS } from './constants';
 import { buildDestinationStatsRequest } from './build_destination_stats_request';
+import { buildProcessorStatsRequest } from './build_processor_stats_request';
+import {
+  mapProcessorStatsResponse,
+  type ProcessorStatsAggregations,
+} from './map_processor_stats_response';
 import {
   mapDestinationStatsResponse,
   type DestinationStatsAggregations,
@@ -112,7 +117,8 @@ export async function getUnitStats({
   const processorIds = new Set((unit.processors ?? []).map((p) => p.id));
 
   const outcomes = new Map<string, StreamsUnit.StatsResourceResult>();
-  const queryableIds: string[] = [];
+  const destinationRefs: StreamsUnit.StatsResourceRef[] = [];
+  const processorRefs: StreamsUnit.StatsResourceRef[] = [];
 
   for (const ref of refs) {
     if (ref.kind === 'destination') {
@@ -122,53 +128,105 @@ export async function getUnitStats({
       } else if (!DESTINATION_TYPES_WITH_STATS.includes(destination.type)) {
         outcomes.set(refKey(ref), resultFor(ref, 'unsupported'));
       } else {
-        queryableIds.push(ref.id);
+        destinationRefs.push(ref);
       }
     } else if (!processorIds.has(ref.id)) {
       outcomes.set(refKey(ref), resultFor(ref, 'not_found'));
     } else {
-      // Spike: processor stats are a stretch step.
-      outcomes.set(
-        refKey(ref),
-        resultFor(ref, 'unsupported', [], 'Processor stats are not implemented yet.')
-      );
+      processorRefs.push(ref);
     }
   }
 
   let configHash = request.filter?.config_hash;
-  const setAll = (status: string, reason?: string) => {
-    for (const ref of refs) {
-      if (ref.kind === 'destination' && queryableIds.includes(ref.id)) {
-        outcomes.set(refKey(ref), resultFor(ref, status, [], reason));
-      }
+  const setAll = (group: StreamsUnit.StatsResourceRef[], status: string, reason?: string) => {
+    for (const ref of group) {
+      outcomes.set(refKey(ref), resultFor(ref, status, [], reason));
     }
   };
 
-  if (queryableIds.length > 0) {
+  /** Runs one search for a group of refs and maps rows to results. Never throws. */
+  const runGroup = async (
+    group: StreamsUnit.StatsResourceRef[],
+    search: () => Promise<Map<string, StreamsUnit.StatsMetric[]>>
+  ) => {
+    try {
+      const rowsById = await search();
+      for (const ref of group) {
+        const rows = rowsById.get(ref.id);
+        outcomes.set(refKey(ref), resultFor(ref, rows ? 'ok' : 'no_data', rows ?? []));
+      }
+    } catch (error) {
+      logger.debug(`Unit stats query failed for unit [${unitId}]: ${(error as Error).message}`);
+      const { status, reason } = statusForSearchError(error);
+      setAll(group, status, reason);
+    }
+  };
+
+  const queryable = [...destinationRefs, ...processorRefs];
+
+  if (queryable.length > 0) {
     try {
       if (!configHash) {
         const hashResponse = await esClient.search(buildConfigHashRequest({ unitId, window }));
         configHash = readConfigHash(hashResponse);
       }
-
-      if (!configHash) {
-        setAll('no_data');
-      } else {
-        const response = await esClient.search<unknown, DestinationStatsAggregations>(
-          buildDestinationStatsRequest({ unitId, window, ids: queryableIds, configHash })
-        );
-        const rowsById = mapDestinationStatsResponse(response.aggregations);
-        for (const ref of refs) {
-          if (ref.kind === 'destination' && queryableIds.includes(ref.id)) {
-            const rows = rowsById.get(ref.id);
-            outcomes.set(refKey(ref), resultFor(ref, rows ? 'ok' : 'no_data', rows ?? []));
-          }
-        }
-      }
     } catch (error) {
-      logger.debug(`Unit stats query failed for unit [${unitId}]: ${(error as Error).message}`);
+      logger.debug(
+        `Unit stats hash lookup failed for unit [${unitId}]: ${(error as Error).message}`
+      );
       const { status, reason } = statusForSearchError(error);
-      setAll(status, reason);
+      setAll(queryable, status, reason);
+      configHash = undefined;
+      queryable.length = 0;
+    }
+  }
+
+  if (queryable.length > 0) {
+    if (!configHash) {
+      setAll(queryable, 'no_data');
+    } else {
+      const hash = configHash;
+      const searches: Array<Promise<void>> = [];
+
+      if (destinationRefs.length > 0) {
+        searches.push(
+          runGroup(destinationRefs, async () => {
+            const response = await esClient.search<unknown, DestinationStatsAggregations>(
+              buildDestinationStatsRequest({
+                unitId,
+                window,
+                ids: destinationRefs.map((ref) => ref.id),
+                configHash: hash,
+              })
+            );
+            return mapDestinationStatsResponse(response.aggregations);
+          })
+        );
+      }
+
+      // One search per distinct placement. Refs without a pipeline id share one search.
+      const byPipeline = new Map<string | undefined, StreamsUnit.StatsResourceRef[]>();
+      for (const ref of processorRefs) {
+        byPipeline.set(ref.pipeline_id, [...(byPipeline.get(ref.pipeline_id) ?? []), ref]);
+      }
+      for (const [pipelineId, group] of byPipeline) {
+        searches.push(
+          runGroup(group, async () => {
+            const response = await esClient.search<unknown, ProcessorStatsAggregations>(
+              buildProcessorStatsRequest({
+                unitId,
+                window,
+                ids: group.map((ref) => ref.id),
+                configHash: hash,
+                pipelineId,
+              })
+            );
+            return mapProcessorStatsResponse(response.aggregations);
+          })
+        );
+      }
+
+      await Promise.all(searches);
     }
   }
 

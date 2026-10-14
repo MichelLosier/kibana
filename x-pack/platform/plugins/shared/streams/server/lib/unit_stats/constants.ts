@@ -9,8 +9,9 @@
  * Stream, field names and the window for unit stats, in one place.
  *
  * The stream was renamed on Oct 12 (it was `metrics-streams.metrics.otel-default`).
- * The resource attributes changed on Oct 14 from `unit_id` to `unit.id`. Older
- * data keeps the old names, so the unit id filter accepts both.
+ * Verified on the local stack on Oct 14: the old name does not exist, the new
+ * stream is not hidden, and the resource attributes are dotted (`unit.id`).
+ * The old `unit_id` is still accepted in the unit id filter for older data.
  */
 
 /** Query the exact name. A wildcard hides both a 403 and a missing stream. */
@@ -30,8 +31,18 @@ export const OUTCOME_FIELD = 'attributes.outcome';
 
 export const DESTINATION_ID_FIELD = 'attributes.streams.destination.id';
 
+export const DIRECTION_FIELD = 'attributes.direction';
+export const PIPELINE_ID_FIELD = 'attributes.streams.pipeline.id';
+export const STEP_ID_FIELD = 'attributes.streams.step.id';
+
 export const DESTINATION_ITEMS_FIELD = 'metrics.streams.destination.items';
 export const DESTINATION_BYTES_FIELD = 'metrics.streams.destination.bytes';
+
+export const DESTINATION_DURATION_FIELD = 'metrics.streams.destination.duration';
+
+export const STEP_ITEMS_FIELD = 'metrics.streams.step.items';
+export const STEP_BYTES_FIELD = 'metrics.streams.step.bytes';
+export const STEP_DURATION_FIELD = 'metrics.streams.step.duration';
 
 /** Destination types that emit user-facing metrics (ADR 348, decision 4). */
 export const DESTINATION_TYPES_WITH_STATS = ['elasticsearch'];
@@ -42,6 +53,9 @@ export const METRIC_UNITS = {
   bytes: 'By',
   duration: 's',
 } as const;
+
+/** Cap on distinct direction values per step. */
+export const MAX_DIRECTION_BUCKETS = 5;
 
 /** Cap on distinct outcome values per resource. */
 export const MAX_OUTCOME_BUCKETS = 20;
