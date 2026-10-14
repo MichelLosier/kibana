@@ -8,6 +8,8 @@
 import React, { useMemo } from 'react';
 import type { AppHeaderTab } from '@kbn/app-header';
 import { i18n } from '@kbn/i18n';
+import { useKibana } from '../../hooks/use_kibana';
+import { createStatsClient, StatsManagerProvider } from '../../services/stats';
 import { useStreamsAppParams } from '../../hooks/use_streams_app_params';
 import { useStreamsAppRouter } from '../../hooks/use_streams_app_router';
 import { useStreamsPrivileges } from '../../hooks/use_streams_privileges';
@@ -30,6 +32,18 @@ export function StreamsLayout() {
     path: { tab },
   } = useStreamsAppParams('/new-experience/{tab}');
   const router = useStreamsAppRouter();
+  const {
+    dependencies: {
+      start: {
+        streams: { streamsRepositoryClient },
+      },
+    },
+  } = useKibana();
+  // One manager above the tabs. The Map and the tables share its cache.
+  const statsClient = useMemo(
+    () => createStatsClient({ streamsRepositoryClient }),
+    [streamsRepositoryClient]
+  );
   const { rangeFrom, rangeTo } = useTimeRange();
   const {
     features: { canvas },
@@ -71,7 +85,7 @@ export function StreamsLayout() {
   );
 
   return (
-    <>
+    <StatsManagerProvider client={statsClient}>
       <StreamsAppHeader
         title={i18n.translate('xpack.streams.streamsLayout.pageHeaderTitle', {
           defaultMessage: 'Streams',
@@ -83,6 +97,6 @@ export function StreamsLayout() {
         tabs={appHeaderTabs}
       />
       {body}
-    </>
+    </StatsManagerProvider>
   );
 }
