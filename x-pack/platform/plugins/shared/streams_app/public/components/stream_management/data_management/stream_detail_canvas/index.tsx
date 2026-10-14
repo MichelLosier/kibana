@@ -84,6 +84,7 @@ import {
   useSourceEnvironmentLoader,
   useSources,
 } from '../../../streams_layout/sources/sources_context';
+import { countRender } from '../../../../services/stats';
 import { createUnitRepository, type Unit } from '../../../../services/unit_repository';
 import type { SourceType, SourceViewModel } from '../../../streams_layout/sources/types';
 import { SOURCE_TYPE_CONFIG_BY_TYPE } from '../../../streams_layout/sources/source_type_config';
@@ -235,6 +236,7 @@ function StreamsCanvasInner() {
   );
 
   const graph = useMemo<ClassicCanvasGraph>(() => {
+    countRender('graph-useMemo');
     const nextGraph = buildClassicStreamsGraph(value?.streams ?? []);
     const unitConnectionEdges = buildUnitConnectionEdges(
       unitDefinition,

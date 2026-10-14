@@ -16,3 +16,5 @@ export {
 } from './derived';
 export type { ResourceStats, StatsClient, StatsResourceRef, StatsStatus } from './types';
 export { statsKey } from './types';
+export { formatStatsText, StatsText } from './stats_text';
+export { countRender } from './render_counter';

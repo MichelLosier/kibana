@@ -225,7 +225,7 @@ export const destinationsTableStateMachine = setup({
       selectedTypes: [],
       sortingColumns: [{ id: 'name', direction: 'asc' as const }],
       pagination: { pageIndex: 0, pageSize: 10 },
-      visibleColumnIds: ['name', 'type'],
+      visibleColumnIds: ['name', 'type', 'throughput'],
       loadUnitDefinition: input.loadUnitDefinition,
       persistUnitDefinition: input.persistUnitDefinition,
       error: undefined,

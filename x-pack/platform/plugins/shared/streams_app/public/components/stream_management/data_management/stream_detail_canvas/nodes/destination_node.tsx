@@ -14,6 +14,7 @@ import { ConnectionHandle } from './connection_handle';
 import type { DestinationNode as DestinationNodeType } from '../types';
 import { DESTINATION_NODE_WIDTH } from '../canvas_constants';
 import { getNodeCardStyles } from './node_card_styles';
+import { countRender, StatsText } from '../../../../../services/stats';
 
 const processingLabel = i18n.translate('xpack.streams.canvas.destinationNode.processingLabel', {
   defaultMessage: 'Processing',
@@ -23,6 +24,7 @@ export function DestinationNode({ data, selected, dragging }: NodeProps<Destinat
   const { euiTheme } = useEuiTheme();
   const isUnconfigured = Boolean(data.unconfiguredNodeId);
   const streamName = data.streamName;
+  countRender(`node-render:${data.destinationId ?? data.title}`);
 
   return (
     <>
@@ -71,6 +73,12 @@ export function DestinationNode({ data, selected, dragging }: NodeProps<Destinat
             {data.subtitle && (
               <EuiText size="s" color="subdued">
                 {data.subtitle}
+              </EuiText>
+            )}
+            {data.destinationId && !isUnconfigured && (
+              // Stats are read in a child through the manager. They never enter node data.
+              <EuiText size="s" color="subdued" data-test-subj="streamsCanvasDestinationStats">
+                <StatsText type="destination" id={data.destinationId} />
               </EuiText>
             )}
           </div>

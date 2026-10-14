@@ -26,6 +26,7 @@ import type {
 import { i18n } from '@kbn/i18n';
 import { KbnDangerCallout } from '@kbn/ui-callout';
 import { ROW_ACTIONS_COLUMN_WIDTH, RowActionsMenu } from '../row_actions_menu';
+import { StatsText } from '../../../services/stats';
 import { LOCAL_ELASTICSEARCH_LABEL } from './destination_type_config';
 import type { DestinationViewModel } from './types';
 
@@ -49,6 +50,13 @@ const DESTINATION_GRID_COLUMNS: EuiDataGridColumn[] = [
     displayAsText: i18n.translate('xpack.streams.destinations.table.typeColumnLabel', {
       defaultMessage: 'Type',
     }),
+  },
+  {
+    id: 'throughput',
+    displayAsText: i18n.translate('xpack.streams.destinations.table.throughputColumnLabel', {
+      defaultMessage: 'Throughput',
+    }),
+    isSortable: false,
   },
 ];
 
@@ -137,6 +145,17 @@ export const DestinationsGrid = ({
           >
             {destination.name}
           </EuiButtonEmpty>
+        );
+      }
+      if (columnId === 'throughput') {
+        // Mounted only for rows on the current page, so the hook registers only those ids.
+        return (
+          <StatsText
+            type="destination"
+            id={destination.id}
+            parts={{ rate: true }}
+            debugLabel="table"
+          />
         );
       }
       return <EuiBadge color="hollow">{LOCAL_ELASTICSEARCH_LABEL}</EuiBadge>;

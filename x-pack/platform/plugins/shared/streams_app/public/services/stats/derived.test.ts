@@ -14,6 +14,7 @@ import {
 import { createFixtureStatsClient } from './fixture_stats_client';
 import { fromWireResponse, toWireRequest } from './map_stats_response';
 import { createStatsClient } from './stats_client';
+import { formatStatsText } from './stats_text';
 import type { ResourceStats } from './types';
 import { statsKey } from './types';
 
@@ -141,5 +142,26 @@ describe('real client', () => {
     const client = createStatsClient({ streamsRepositoryClient: { fetch } as never });
     const { entries } = await client.fetchStats({ resources, signal });
     expect(entries[statsKey(resources[0])].status).toBe(status);
+  });
+});
+
+describe('formatStatsText', () => {
+  const base = { metrics: [] as never[] };
+
+  it.each(['no_data', 'unavailable', 'forbidden', 'idle', 'a_future_status'])(
+    'shows a dash for %s, never zero',
+    (status) => {
+      expect(formatStatsText({ ...base, status }, 'destination')).toBe('–');
+    }
+  );
+
+  it('shows an ellipsis while loading', () => {
+    expect(formatStatsText({ ...base, status: 'loading' }, 'destination')).toBe('…');
+  });
+
+  it('shows rate only for the table column', async () => {
+    const stats = await fixtureEntry('step', 'uppercase-message');
+    expect(formatStatsText(stats, 'step', { rate: true })).toBe('3.7 eps');
+    expect(formatStatsText(stats, 'step')).toBe('3.7 eps · 8ms');
   });
 });
