@@ -49,7 +49,10 @@ export const formatEventsPerSecond = (eps: number): string => {
   if (eps >= 1_000_000) return `${trim(eps / 1_000_000)}M eps`;
   if (eps >= 1_000) return `${trim(eps / 1_000)}k eps`;
   if (eps >= 10 || eps === 0) return `${Math.round(eps)} eps`;
-  return `${trim(eps)} eps`;
+  if (eps >= 1) return `${trim(eps)} eps`;
+  // Below 1 eps keep two decimals so a quiet unit does not read as zero.
+  if (eps < 0.01) return '<0.01 eps';
+  return `${Math.round(eps * 100) / 100} eps`;
 };
 
 /** `8ms`, `1.2s`, `77µs`. */
