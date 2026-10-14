@@ -54,6 +54,16 @@ export const parseIndexPatterns = (value: string): string[] =>
     .map((pattern) => pattern.trim())
     .filter((pattern) => pattern.length > 0);
 
+const readStaticIndex = (destination: UnitDestination): string | undefined => {
+  const explicit = readConfigString(destination, 'index');
+  if (!explicit || indexUsesTemplate(explicit)) {
+    return undefined;
+  }
+  const patterns = readConfigStringList(destination, 'index_patterns');
+  const onlyItself = patterns.length === 0 || (patterns.length === 1 && patterns[0] === explicit);
+  return onlyItself ? explicit : undefined;
+};
+
 const readDestinationIndex = (destination: UnitDestination): string =>
   readConfigString(destination, 'index') ?? destination.id;
 
@@ -83,6 +93,7 @@ export const toDestinationViewModel = (
     type: LOCAL_ELASTICSEARCH_TYPE,
     index,
     indexPatterns: readDestinationIndexPatterns(destination, index),
+    staticIndex: readStaticIndex(destination),
   };
 };
 

@@ -27,6 +27,7 @@ import { i18n } from '@kbn/i18n';
 import { KbnDangerCallout } from '@kbn/ui-callout';
 import { ROW_ACTIONS_COLUMN_WIDTH, RowActionsMenu } from '../row_actions_menu';
 import { StatsText } from '../../../services/stats';
+import { DestinationDocsCell } from '../../../services/stats/destination_docs_cell';
 import { LOCAL_ELASTICSEARCH_LABEL } from './destination_type_config';
 import type { DestinationViewModel } from './types';
 
@@ -50,6 +51,13 @@ const DESTINATION_GRID_COLUMNS: EuiDataGridColumn[] = [
     displayAsText: i18n.translate('xpack.streams.destinations.table.typeColumnLabel', {
       defaultMessage: 'Type',
     }),
+  },
+  {
+    id: 'docs',
+    displayAsText: i18n.translate('xpack.streams.destinations.table.docsColumnLabel', {
+      defaultMessage: 'Docs',
+    }),
+    isSortable: false,
   },
   {
     id: 'throughput',
@@ -147,6 +155,10 @@ export const DestinationsGrid = ({
           </EuiButtonEmpty>
         );
       }
+      if (columnId === 'docs') {
+        // Static-index destinations only. Auto and templated destinations show a dash.
+        return <DestinationDocsCell index={destination.staticIndex} />;
+      }
       if (columnId === 'throughput') {
         // Mounted only for rows on the current page, so the hook registers only those ids.
         return (
@@ -225,6 +237,7 @@ export const DestinationsGrid = ({
         }}
         trailingControlColumns={trailingControlColumns}
         rowCount={destinations.length}
+        rowHeightsOptions={{ defaultHeight: 56 }}
         renderCellValue={renderCellValue}
         sorting={{ columns: sortingColumns, onSort: onSortingChange }}
         data-test-subj="streamsDestinationsTable"
