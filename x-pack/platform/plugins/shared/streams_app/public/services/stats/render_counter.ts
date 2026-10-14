@@ -16,8 +16,19 @@ declare global {
   }
 }
 
+/** True when `window.__STREAMS_STATS_DEBUG__` is set or localStorage `streamsStatsDebug` is `1`. */
+export const isStatsDebug = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  if (window.__STREAMS_STATS_DEBUG__) return true;
+  try {
+    return window.localStorage.getItem('streamsStatsDebug') === '1';
+  } catch {
+    return false;
+  }
+};
+
 export const countRender = (label: string) => {
-  if (typeof window === 'undefined' || !window.__STREAMS_STATS_DEBUG__) return;
+  if (!isStatsDebug()) return;
   const counts = (window.__streamsStatsRenders ??= {});
   counts[label] = (counts[label] ?? 0) + 1;
   // eslint-disable-next-line no-console

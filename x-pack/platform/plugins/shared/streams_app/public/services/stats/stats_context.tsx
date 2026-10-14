@@ -9,6 +9,7 @@ import React, { useEffect, useMemo } from 'react';
 import { createActorContext } from '@xstate/react';
 import { metricsManagerMachine } from './metrics_manager_machine';
 import type { ResourceStats, StatsClient, StatsResourceRef } from './types';
+import { isStatsDebug } from './render_counter';
 import { IDLE_STATS, statsKey } from './types';
 
 /**
@@ -27,7 +28,7 @@ const DebugLogger = () => {
   const actorRef = StatsManagerContext.useActorRef();
   useEffect(() => {
     const subscription = actorRef.subscribe((snapshot) => {
-      if (typeof window !== 'undefined' && window.__STREAMS_STATS_DEBUG__) {
+      if (isStatsDebug()) {
         // eslint-disable-next-line no-console
         console.debug('[streams-stats]', {
           state: snapshot.value,
