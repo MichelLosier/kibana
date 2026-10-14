@@ -6,10 +6,13 @@
  */
 
 import {
+  STREAMS_UNIT_STATS_MAX_RESOURCES,
   collectUnitComponentIds,
   findDuplicateUnitComponentIds,
   streamsUnitSchema,
   streamsUnitSecretsSchema,
+  streamsUnitStatsRequestSchema,
+  streamsUnitStatsResponseSchema,
   streamsUnitUpsertRequestSchema,
   type StreamsUnit,
 } from './unit';
@@ -109,5 +112,67 @@ describe('streams unit schema', () => {
         ],
       })
     ).toEqual(['otlp-input']);
+  });
+});
+
+describe('streams unit stats schemas', () => {
+  it('accepts an empty request', () => {
+    expect(streamsUnitStatsRequestSchema.parse({})).toEqual({});
+  });
+
+  it('accepts a request with filter and resources', () => {
+    expect(() =>
+      streamsUnitStatsRequestSchema.parse({
+        filter: { config_hash: 'abc' },
+        resources: [
+          { kind: 'destination', id: 'es-prod' },
+          { kind: 'processor', id: 'uppercase-message', pipeline_id: 'main' },
+        ],
+      })
+    ).not.toThrow();
+  });
+
+  it.each([
+    ['unknown top-level field', { time_windw: 1 }],
+    ['unknown resource kind', { resources: [{ kind: 'source', id: 'a' }] }],
+    ['invalid resource id', { resources: [{ kind: 'destination', id: 'Not_Valid' }] }],
+    ['unknown resource field', { resources: [{ kind: 'destination', id: 'a', extra: 1 }] }],
+    ['unknown filter field', { filter: { time_range: {} } }],
+    ['empty config hash', { filter: { config_hash: '' } }],
+    [
+      'too many resources',
+      {
+        resources: Array.from({ length: STREAMS_UNIT_STATS_MAX_RESOURCES + 1 }, (_, i) => ({
+          kind: 'destination',
+          id: `d${i}`,
+        })),
+      },
+    ],
+  ])('rejects %s', (_name, body) => {
+    expect(() => streamsUnitStatsRequestSchema.parse(body)).toThrow();
+  });
+
+  it('parses the response example and keeps unknown statuses', () => {
+    const parsed = streamsUnitStatsResponseSchema.parse({
+      results: [
+        {
+          kind: 'destination',
+          id: 'es-prod',
+          status: 'ok',
+          metrics: [
+            {
+              name: 'items',
+              aggregation: 'sum',
+              value: 12,
+              unit: '{item}',
+              dimensions: { outcome: 'success' },
+            },
+          ],
+        },
+        { kind: 'destination', id: 'es-dev', status: 'a_future_status', metrics: [] },
+      ],
+      meta: { window: { start: '2026-10-13T12:32:00.000Z', end: '2026-10-13T12:47:00.000Z' } },
+    });
+    expect(parsed.results[1].status).toBe('a_future_status');
   });
 });

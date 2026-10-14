@@ -177,6 +177,79 @@ export const streamsUnitUpsertRequestSchema = z.object({
   secrets: streamsUnitSecretsSchema.optional(),
 });
 
+/** Spike. Cap on resources per stats request. */
+export const STREAMS_UNIT_STATS_MAX_RESOURCES = 200;
+
+/** Request side. A closed enum is safe here: adding a value never breaks an old client. */
+export const streamsUnitStatsResourceKindSchema = z.enum(['destination', 'processor']);
+
+export const streamsUnitStatsResourceRefSchema = z.strictObject({
+  kind: streamsUnitStatsResourceKindSchema,
+  id: streamsUnitIdentifierSchema,
+  /** Optional placement. Omit it to sum over every pipeline that uses the processor. */
+  pipeline_id: streamsUnitIdentifierSchema.optional(),
+});
+
+export const streamsUnitStatsFilterSchema = z.strictObject({
+  /** Omit for the latest config hash that the server observes in the window. */
+  config_hash: z.string().min(1).max(128).optional(),
+});
+
+export const streamsUnitStatsRequestSchema = z.strictObject({
+  filter: streamsUnitStatsFilterSchema.optional(),
+  /** Omit for the default sample. */
+  resources: z
+    .array(streamsUnitStatsResourceRefSchema)
+    .max(STREAMS_UNIT_STATS_MAX_RESOURCES)
+    .optional(),
+});
+
+/** Response side. Open strings everywhere. Do not use z.enum here. */
+export const streamsUnitStatsMetricSchema = z.object({
+  /** Metric name, scoped by resource kind. Example: "items". */
+  name: z.string(),
+  /** How the server computed the value. Example: "sum", "avg", "p95". */
+  aggregation: z.string(),
+  value: z.number(),
+  /** OTel unit string. Examples: "{item}", "By", "s". */
+  unit: z.string(),
+  /** Attributes that split this metric. Example: { outcome: "failure" }. */
+  dimensions: z.record(z.string(), z.string()).optional(),
+});
+
+export const streamsUnitStatsResourceResultSchema = z.object({
+  kind: z.string(),
+  id: z.string(),
+  /** Open set. Known values are in STREAMS_UNIT_STATS_KNOWN_STATUSES. */
+  status: z.string(),
+  error: z.object({ reason: z.string() }).optional(),
+  metrics: z.array(streamsUnitStatsMetricSchema),
+});
+
+export const streamsUnitStatsMetaSchema = z.object({
+  window: z.object({ start: z.string(), end: z.string() }),
+  config_hash: z.string().optional(),
+  sampled: z.boolean().optional(),
+  truncated: z.boolean().optional(),
+  limits: z.record(z.string(), z.number()).optional(),
+});
+
+export const streamsUnitStatsResponseSchema = z.object({
+  results: z.array(streamsUnitStatsResourceResultSchema),
+  meta: streamsUnitStatsMetaSchema,
+});
+
+/** Documentation for client authors. Never use it to narrow a response type. */
+export const STREAMS_UNIT_STATS_KNOWN_STATUSES = [
+  'ok',
+  'no_data',
+  'unavailable',
+  'forbidden',
+  'error',
+  'not_found',
+  'unsupported',
+] as const;
+
 export const collectUnitComponentIds = (unit: StreamsUnit.Configuration): string[] => {
   const components: ReadonlyArray<{ id?: unknown }> = [
     ...(Array.isArray(unit.sources) ? unit.sources : []),
@@ -215,6 +288,12 @@ export namespace StreamsUnit {
   export type Secrets = z.infer<typeof streamsUnitSecretsSchema>;
   export type GetResponse = z.infer<typeof streamsUnitResponseSchema>;
   export type UpsertRequest = z.infer<typeof streamsUnitUpsertRequestSchema>;
+  export type StatsRequest = z.infer<typeof streamsUnitStatsRequestSchema>;
+  export type StatsResourceRef = z.infer<typeof streamsUnitStatsResourceRefSchema>;
+  export type StatsMetric = z.infer<typeof streamsUnitStatsMetricSchema>;
+  export type StatsResourceResult = z.infer<typeof streamsUnitStatsResourceResultSchema>;
+  export type StatsMeta = z.infer<typeof streamsUnitStatsMetaSchema>;
+  export type StatsResponse = z.infer<typeof streamsUnitStatsResponseSchema>;
   export interface ConfigurationSavedObjectAttributes {
     unit_id: Identifier;
     unit: Configuration;
