@@ -300,6 +300,7 @@ describe('processor stats', () => {
       ['uppercase-message', 'ok'],
       ['missing', 'not_found'],
     ]);
+    expect(response.results.map((r) => r.pipeline_id)).toEqual([undefined, 'main', undefined]);
     // hash lookup, all pipelines, and one placement.
     expect(search).toHaveBeenCalledTimes(3);
   });

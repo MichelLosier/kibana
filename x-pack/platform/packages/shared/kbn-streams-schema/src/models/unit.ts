@@ -220,6 +220,8 @@ export const streamsUnitStatsMetricSchema = z.object({
 export const streamsUnitStatsResourceResultSchema = z.object({
   kind: z.string(),
   id: z.string(),
+  /** Echoed from the request when the client asked for one placement. */
+  pipeline_id: z.string().optional(),
   /** Open set. Known values are in STREAMS_UNIT_STATS_KNOWN_STATUSES. */
   status: z.string(),
   error: z.object({ reason: z.string() }).optional(),

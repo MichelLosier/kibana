@@ -31,6 +31,7 @@ const resultFor = (
 ): StreamsUnit.StatsResourceResult => ({
   kind: ref.kind,
   id: ref.id,
+  ...(ref.pipeline_id ? { pipeline_id: ref.pipeline_id } : {}),
   status,
   metrics,
   ...(reason ? { error: { reason } } : {}),
