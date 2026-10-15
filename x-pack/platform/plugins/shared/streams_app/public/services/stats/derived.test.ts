@@ -11,7 +11,12 @@ import {
   getAverageSeconds,
   getEventsPerSecond,
 } from './derived';
-import { formatDocsTotal, toChartProps } from './destination_docs_cell';
+import {
+  formatDocsTotal,
+  formatWindowTitle,
+  getTooltipHeaderFormatter,
+  toChartProps,
+} from './destination_docs_cell';
 import { createFixtureStatsClient, fixtureStatsResponse } from './fixture_stats_client';
 import { entriesForFailure, fromWireResponse, toWireRequest } from './map_stats_response';
 import { createStatsClient } from './stats_client';
@@ -106,7 +111,7 @@ describe('formatStatsText', () => {
 describe('docs cell helpers', () => {
   it('formats the total and maps the series to chart props', async () => {
     const stats = await fixtureEntry('destination', 'es-prod');
-    expect(formatDocsTotal(stats)).toBe('16,560');
+    expect(formatDocsTotal(stats)).toBe('16,560 docs');
     const chart = toChartProps(stats.series!);
     expect(chart.data).toHaveLength(15);
     expect(chart.data[0]).toEqual({ x: Date.parse('2026-10-14T11:45:00.000Z'), doc_count: 1104 });
@@ -117,6 +122,20 @@ describe('docs cell helpers', () => {
     });
     // The total is the sum of the points.
     expect(chart.data.reduce((sum, point) => sum + point.doc_count, 0)).toBe(stats.totalEvents);
+  });
+
+  it('uses a human readable tooltip header and a window title', async () => {
+    const stats = await fixtureEntry('destination', 'es-prod');
+    const header = getTooltipHeaderFormatter(stats.series!)({
+      value: Date.parse('2026-10-14T11:50:00.000Z'),
+    });
+    expect(header).not.toMatch(/^\d{10,}$/);
+    expect(header).toMatch(/\d{1,2}:\d{2}/);
+    expect(formatWindowTitle(stats.series!)).toContain('Documents processed from');
+  });
+
+  it('reads one doc in the singular', () => {
+    expect(formatDocsTotal({ ...IDLE_STATS, phase: 'loaded', totalEvents: 1 })).toBe('1 doc');
   });
 
   it('shows a dash with no data or an error, never zero', async () => {

@@ -7,7 +7,16 @@
 
 import React, { useMemo } from 'react';
 import { EuiIconTip } from '@elastic/eui';
-import { BarSeries, Chart, ScaleType, Settings, Tooltip, TooltipStickTo } from '@elastic/charts';
+import {
+  BarSeries,
+  Chart,
+  niceTimeFormatter,
+  ScaleType,
+  Settings,
+  Tooltip,
+  TooltipStickTo,
+} from '@elastic/charts';
+import { i18n } from '@kbn/i18n';
 import { useElasticChartsTheme } from '@kbn/charts-theme';
 import { countRender } from './render_counter';
 import { useRegisterStats, useStatsFor } from './stats_context';
@@ -15,12 +24,35 @@ import type { ComponentStats, StatsComponentRef, StatsSeries } from './types';
 
 export const NO_DOCS_TEXT = '–';
 
-/** Total beneath the bars. The sum of the points, so it agrees with them. */
+const DOCS_SERIES_NAME = i18n.translate('xpack.streams.destinations.docsCell.seriesName', {
+  defaultMessage: 'Documents',
+});
+
+/** Total beneath the bars, in the design's form: `1,221,223 docs`. The sum of the points. */
 export const formatDocsTotal = (stats: ComponentStats): string => {
   if (stats.phase === 'loading') return '…';
   if (stats.phase !== 'loaded' || stats.error || stats.totalEvents === null) return NO_DOCS_TEXT;
-  return stats.totalEvents.toLocaleString();
+  return i18n.translate('xpack.streams.destinations.docsCell.totalLabel', {
+    defaultMessage: '{count, number} {count, plural, one {doc} other {docs}}',
+    values: { count: stats.totalEvents },
+  });
 };
+
+/** Tooltip header over the bars: a readable time, never an epoch number. Same as classic. */
+export const getTooltipHeaderFormatter = (series: StatsSeries) => {
+  const format = niceTimeFormatter([series.window.start, series.window.end]);
+  return ({ value }: { value: number }) => format(value);
+};
+
+/** Title for the cell: the window the numbers cover. */
+export const formatWindowTitle = (series: StatsSeries): string =>
+  i18n.translate('xpack.streams.destinations.docsCell.windowTitle', {
+    defaultMessage: 'Documents processed from {start} to {end}',
+    values: {
+      start: new Date(series.window.start).toLocaleString(),
+      end: new Date(series.window.end).toLocaleString(),
+    },
+  });
 
 /**
  * The one chart mapper. Points[i].start becomes x, value becomes y, bucket width becomes
@@ -49,19 +81,29 @@ export const DestinationDocsCell = ({ id }: { id: string }) => {
     stats.series && stats.series.points.length > 0 ? toChartProps(stats.series) : undefined;
 
   return (
-    <div data-test-subj="streamsDestinationDocs" data-stats-phase={stats.phase}>
-      <div style={{ height: 20, width: '100%' }}>
-        {chart && !stats.error && (
-          <Chart size={{ width: '100%', height: 20 }}>
+    // One block: the chart and the total share the same left edge and width.
+    <div
+      data-test-subj="streamsDestinationDocs"
+      data-stats-phase={stats.phase}
+      title={stats.series ? formatWindowTitle(stats.series) : undefined}
+      style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', width: '100%' }}
+    >
+      <div style={{ height: 22, width: '100%' }}>
+        {chart && !stats.error && stats.series && (
+          <Chart size={{ width: '100%', height: 22 }}>
             <Settings
               baseTheme={chartBaseTheme}
               theme={{ background: { color: 'transparent' } }}
               xDomain={chart.xDomain}
               noResults={<div />}
             />
-            <Tooltip stickTo={TooltipStickTo.Middle} />
+            <Tooltip
+              stickTo={TooltipStickTo.Middle}
+              headerFormatter={getTooltipHeaderFormatter(stats.series)}
+            />
             <BarSeries
               id="docs"
+              name={DOCS_SERIES_NAME}
               xScaleType={ScaleType.Time}
               yScaleType={ScaleType.Linear}
               xAccessor="x"
@@ -72,7 +114,10 @@ export const DestinationDocsCell = ({ id }: { id: string }) => {
           </Chart>
         )}
       </div>
-      <span data-test-subj="streamsDestinationDocsText">
+      <span
+        data-test-subj="streamsDestinationDocsText"
+        style={{ textAlign: 'left', lineHeight: '16px', whiteSpace: 'nowrap' }}
+      >
         {stats.error ? (
           <EuiIconTip
             content={stats.error.reason}
