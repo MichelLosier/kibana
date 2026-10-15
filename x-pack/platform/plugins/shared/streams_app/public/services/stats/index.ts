@@ -11,10 +11,10 @@ export { StatsManagerProvider, useRegisterStats, useStatsFor } from './stats_con
 export {
   formatDuration,
   formatEventsPerSecond,
-  getAverageDurationSeconds,
+  getAverageSeconds,
   getEventsPerSecond,
 } from './derived';
-export type { ResourceStats, StatsClient, StatsResourceRef, StatsStatus } from './types';
+export type { ComponentStats, StatsClient, StatsComponentRef } from './types';
 export { statsKey } from './types';
 export { formatStatsText, StatsText } from './stats_text';
 export { countRender } from './render_counter';

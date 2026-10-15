@@ -60,7 +60,8 @@ describe('destination node stats', () => {
     });
     const text = screen.getByTestId('streamsStatsText');
     expect(text.textContent).toBe('–');
-    expect(text.getAttribute('data-stats-status')).toBe('no_data');
+    expect(text.getAttribute('data-stats-phase')).toBe('loaded');
+    expect(text.getAttribute('data-stats-error')).toBeNull();
   });
 
   it('does not render stats without a unit destination id', () => {

@@ -5,46 +5,22 @@
  * 2.0.
  */
 
-import type { ResourceStats, StatsMetric, StatsResourceType } from './types';
+import type { ComponentStats } from './types';
 
 /**
- * Derived values for the UI. Choices recorded in the spike findings:
- * - Destination rate counts `success` items. Failures and refusals are not delivered.
- * - Step rate counts the `out` direction, items that left the step.
- * Both divide by the server window, so a config change that shortens real data
- * makes the rate read low.
+ * Display helpers. The server sends rates and averages in seconds, so there is no
+ * division here. A null value is "no data" and renders as a dash, never a number.
  */
 
-const NOT_DELIVERED = ['failure', 'refused'];
+/** Items per second, or undefined when there is no usable number. Zero is a real value. */
+export const getEventsPerSecond = (stats: ComponentStats): number | undefined =>
+  stats.phase === 'loaded' && !stats.error ? stats.eventsPerSecond ?? undefined : undefined;
 
-const isReady = (stats: ResourceStats) => stats.status === 'ready' || stats.status === 'stale';
+/** Seconds, or undefined. Destination: per bulk request. Processor: per event. */
+export const getAverageSeconds = (stats: ComponentStats): number | undefined =>
+  stats.phase === 'loaded' && !stats.error ? stats.averageSeconds ?? undefined : undefined;
 
-const rows = (stats: ResourceStats, name: string, aggregation: string): StatsMetric[] =>
-  stats.metrics.filter((row) => row.name === name && row.aggregation === aggregation);
-
-/** Items per second, or undefined when there is no usable data. Zero is a real value. */
-export const getEventsPerSecond = (
-  stats: ResourceStats,
-  type: StatsResourceType
-): number | undefined => {
-  if (!isReady(stats) || !stats.windowSeconds) return undefined;
-  const items = rows(stats, 'items', 'sum').filter((row) => {
-    const outcome = row.dimensions?.outcome;
-    const direction = row.dimensions?.direction;
-    if (outcome !== undefined && NOT_DELIVERED.includes(outcome)) return false;
-    return type === 'step' ? direction === 'out' : true;
-  });
-  if (items.length === 0) return undefined;
-  return items.reduce((total, row) => total + row.value, 0) / stats.windowSeconds;
-};
-
-/** Average duration in seconds, or undefined. Never average the averages of several rows. */
-export const getAverageDurationSeconds = (stats: ResourceStats): number | undefined => {
-  if (!isReady(stats)) return undefined;
-  return rows(stats, 'duration', 'avg')[0]?.value;
-};
-
-/** `3.7k eps`, `12 eps`, `0 eps`. */
+/** `3.7k eps`, `12 eps`, `0.33 eps`, `<0.01 eps`, `0 eps`. */
 export const formatEventsPerSecond = (eps: number): string => {
   if (eps >= 1_000_000) return `${trim(eps / 1_000_000)}M eps`;
   if (eps >= 1_000) return `${trim(eps / 1_000)}k eps`;

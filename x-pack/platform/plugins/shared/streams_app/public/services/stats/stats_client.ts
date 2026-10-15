@@ -26,27 +26,37 @@ export const createStatsClient = ({
   streamsRepositoryClient: StreamsRepositoryClient;
   unitId?: string;
 }): StatsClient => ({
-  fetchStats: async ({ resources, signal }) => {
+  fetchStats: async ({ components, signal }) => {
     try {
       const response = await streamsRepositoryClient.fetch(
         'POST /internal/streams/unit/{id}/_stats',
         {
           signal,
-          params: { path: { id: unitId }, body: toWireRequest(resources) },
+          params: { path: { id: unitId }, body: toWireRequest(components) },
         }
       );
-      return { entries: fromWireResponse(response, Date.now()) };
+      return { entries: fromWireResponse(response, components, Date.now()) };
     } catch (error) {
       if (signal.aborted) {
         throw error;
       }
       const code = statusCodeOf(error);
       if (code === 403) {
-        return { entries: entriesForFailure(resources, 'forbidden', 'HTTP 403', Date.now()) };
+        return {
+          entries: entriesForFailure(
+            components,
+            { code: 'forbidden', reason: 'HTTP 403' },
+            Date.now()
+          ),
+        };
       }
       if (code !== undefined) {
         return {
-          entries: entriesForFailure(resources, 'unavailable', `HTTP ${code}`, Date.now()),
+          entries: entriesForFailure(
+            components,
+            { code: 'unavailable', reason: `HTTP ${code}` },
+            Date.now()
+          ),
         };
       }
       throw error;

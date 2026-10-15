@@ -9,9 +9,9 @@ import React from 'react';
 import { act, render, screen } from '@testing-library/react';
 import { createFixtureStatsClient } from './fixture_stats_client';
 import { StatsManagerProvider, useRegisterStats, useStatsFor } from './stats_context';
-import type { StatsResourceRef } from './types';
+import type { StatsComponentRef } from './types';
 
-const prod: StatsResourceRef = { type: 'destination', id: 'es-prod' };
+const prod: StatsComponentRef = { kind: 'destination', id: 'es-prod' };
 
 describe('stats provider and hooks', () => {
   beforeEach(() => jest.useFakeTimers());
@@ -24,7 +24,7 @@ describe('stats provider and hooks', () => {
       renders[name]++;
       useRegisterStats([prod]);
       const stats = useStatsFor(prod);
-      return <span data-test-subj={`status-${name}`}>{stats.status}</span>;
+      return <span data-test-subj={`status-${name}`}>{stats.phase}</span>;
     };
 
     render(
@@ -39,8 +39,8 @@ describe('stats provider and hooks', () => {
       await jest.advanceTimersByTimeAsync(300);
     });
 
-    expect(screen.getByTestId('status-a').textContent).toBe('ready');
-    expect(screen.getByTestId('status-b').textContent).toBe('ready');
+    expect(screen.getByTestId('status-a').textContent).toBe('loaded');
+    expect(screen.getByTestId('status-b').textContent).toBe('loaded');
     expect(client.calls).toEqual([{ count: 1 }]);
     // idle, loading, ready for each consumer. A third state change would mean extra renders.
     expect(renders.a).toBeLessThanOrEqual(3);

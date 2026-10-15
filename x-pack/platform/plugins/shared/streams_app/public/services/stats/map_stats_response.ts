@@ -6,82 +6,91 @@
  */
 
 import type { StreamsUnit } from '@kbn/streams-schema';
-import type { ResourceStats, StatsResourceRef, StatsResourceType } from './types';
+import type { ComponentStats, StatsComponentRef, StatsError } from './types';
 import { statsKey } from './types';
 
 /** The only file that maps between UI domain types and the wire shape. */
 
-const WIRE_KIND: Record<StatsResourceType, StreamsUnit.StatsResourceRef['kind']> = {
-  destination: 'destination',
-  step: 'processor',
-};
-
-const UI_TYPE: Record<string, StatsResourceType> = {
-  destination: 'destination',
-  processor: 'step',
-};
-
-export const toWireRequest = (resources: StatsResourceRef[]): StreamsUnit.StatsRequest => ({
-  resources: resources.map((ref) => ({
-    kind: WIRE_KIND[ref.type],
-    id: ref.id,
-    ...(ref.pipelineId ? { pipeline_id: ref.pipelineId } : {}),
-  })),
+export const toWireRequest = (components: StatsComponentRef[]): StreamsUnit.StatsRequest => ({
+  components: components.map(({ kind, id }) => ({ kind, id })),
 });
 
-const windowSeconds = (meta: StreamsUnit.StatsMeta): number | undefined => {
-  const seconds = (Date.parse(meta.window.end) - Date.parse(meta.window.start)) / 1000;
-  return Number.isFinite(seconds) && seconds > 0 ? seconds : undefined;
-};
+const emptyEntry = (now: number, error?: StatsError): ComponentStats => ({
+  phase: 'loaded',
+  eventsPerSecond: null,
+  averageSeconds: null,
+  totalEvents: null,
+  lastUpdated: now,
+  ...(error ? { error } : {}),
+});
 
-const mapStatus = (wire: string): Pick<ResourceStats, 'status' | 'reason'> => {
-  switch (wire) {
-    case 'ok':
-      return { status: 'ready' };
-    case 'no_data':
-    case 'forbidden':
-    case 'unavailable':
-      return { status: wire };
-    default:
-      // error, not_found, unsupported and any future value.
-      return { status: 'unavailable', reason: wire };
-  }
-};
-
+/**
+ * Maps the keyed response to entries. A response-level error is copied onto every
+ * component that has none of its own. A component that is missing from the response
+ * is a problem, not zero.
+ */
 export const fromWireResponse = (
   response: StreamsUnit.StatsResponse,
+  requested: StatsComponentRef[],
   now: number
-): Record<string, ResourceStats> => {
-  const seconds = windowSeconds(response.meta);
-  const entries: Record<string, ResourceStats> = {};
+): Record<string, ComponentStats> => {
+  const { window } = response.meta;
+  const windowMs = { start: Date.parse(window.start), end: Date.parse(window.end) };
+  const entries: Record<string, ComponentStats> = {};
 
-  for (const result of response.results) {
-    const type = UI_TYPE[result.kind];
-    if (!type) {
-      continue; // Unknown kind. Ignore the result.
+  for (const ref of requested) {
+    // Own-property reads only: an id such as `constructor` is valid.
+    const group =
+      ref.kind === 'destination'
+        ? response.components.destinations
+        : response.components.processors;
+    const result = Object.hasOwn(group, ref.id) ? group[ref.id] : undefined;
+    const error = result?.error ?? response.error;
+
+    if (!result) {
+      entries[statsKey(ref)] = emptyEntry(
+        now,
+        error ?? { code: 'error', reason: 'No result for this component.' }
+      );
+    } else if (ref.kind === 'destination') {
+      const destination = result as StreamsUnit.StatsDestinationResult;
+      const incoming = destination.events.incoming;
+      entries[statsKey(ref)] = {
+        phase: 'loaded',
+        eventsPerSecond: incoming.rate.value,
+        averageSeconds: destination.latency.average.value,
+        totalEvents: incoming.total.value,
+        series: {
+          bucketMs: incoming.series.bucket_ms,
+          points: incoming.series.points.map((point) => ({
+            x: Date.parse(point.start),
+            value: point.value,
+          })),
+          window: windowMs,
+        },
+        lastUpdated: now,
+        ...(error ? { error } : {}),
+      };
+    } else {
+      const processor = result as StreamsUnit.StatsProcessorResult;
+      entries[statsKey(ref)] = {
+        phase: 'loaded',
+        eventsPerSecond: processor.events.incoming.rate.value,
+        averageSeconds: processor.processing_duration.average.value,
+        totalEvents: null,
+        lastUpdated: now,
+        ...(error ? { error } : {}),
+      };
     }
-    const { status, reason } = mapStatus(result.status);
-    entries[statsKey({ type, id: result.id, pipelineId: result.pipeline_id })] = {
-      status,
-      metrics: result.metrics,
-      windowSeconds: seconds,
-      lastUpdated: now,
-      ...(reason || result.error?.reason
-        ? { reason: [reason, result.error?.reason].filter(Boolean).join(': ') }
-        : {}),
-    };
   }
 
   return entries;
 };
 
-/** Marks every requested resource with one state. Used when the whole call fails. */
+/** Marks every requested component with one error. Used when the whole call fails. */
 export const entriesForFailure = (
-  resources: StatsResourceRef[],
-  status: 'forbidden' | 'unavailable',
-  reason: string,
+  components: StatsComponentRef[],
+  error: StatsError,
   now: number
-): Record<string, ResourceStats> =>
-  Object.fromEntries(
-    resources.map((ref) => [statsKey(ref), { status, metrics: [], lastUpdated: now, reason }])
-  );
+): Record<string, ComponentStats> =>
+  Object.fromEntries(components.map((ref) => [statsKey(ref), emptyEntry(now, error)]));

@@ -8,8 +8,8 @@
 import { isEqual } from 'lodash';
 import { assign, fromPromise, raise, setup } from 'xstate';
 import { entriesForFailure } from './map_stats_response';
-import type { ResourceStats, StatsClient, StatsFetchResult, StatsResourceRef } from './types';
-import { statsKey } from './types';
+import type { ComponentStats, StatsClient, StatsComponentRef, StatsFetchResult } from './types';
+import { IDLE_STATS, statsKey } from './types';
 
 /** All tuning in one place. Spike values. No polling yet. */
 export const STATS_TUNING = {
@@ -21,7 +21,7 @@ export const STATS_TUNING = {
 export type StatsTuning = { -readonly [K in keyof typeof STATS_TUNING]: number };
 
 interface Registration {
-  ref: StatsResourceRef;
+  ref: StatsComponentRef;
   count: number;
   /** Set when the count reaches zero. A sweep drops the registration after it. */
   releaseAt?: number;
@@ -31,7 +31,7 @@ export interface MetricsManagerContext {
   client: StatsClient;
   tuning: StatsTuning;
   /** What components read. Unchanged entries keep their object reference. */
-  entries: Record<string, ResourceStats>;
+  entries: Record<string, ComponentStats>;
   /** Bookkeeping that components never read. */
   registrations: Record<string, Registration>;
   /** Keys in the request that is in flight. */
@@ -42,12 +42,17 @@ export interface MetricsManagerContext {
 }
 
 export type MetricsManagerEvent =
-  | { type: 'resource.register'; ref: StatsResourceRef }
-  | { type: 'resource.unregister'; ref: StatsResourceRef }
+  | { type: 'resource.register'; ref: StatsComponentRef }
+  | { type: 'resource.unregister'; ref: StatsComponentRef }
   | { type: 'grace.sweep' }
   | { type: 'refresh' };
 
-const LOADING: ResourceStats = { status: 'loading', metrics: [] };
+const LOADING: ComponentStats = {
+  phase: 'loading',
+  eventsPerSecond: null,
+  averageSeconds: null,
+  totalEvents: null,
+};
 
 /** Keys that are registered and have no data yet (or all of them on refresh). */
 const keysToFetch = (context: MetricsManagerContext): string[] =>
@@ -56,7 +61,7 @@ const keysToFetch = (context: MetricsManagerContext): string[] =>
       if (registration.count <= 0) return false;
       if (context.forceRefresh) return true;
       const entry = context.entries[key];
-      return entry === undefined || entry.status === 'idle';
+      return entry === undefined || entry.phase === 'idle';
     })
     .map(([key]) => key);
 
@@ -69,16 +74,19 @@ const chunk = <T>(items: T[], size: number): T[][] => {
 };
 
 /** Reuse the old entry object when nothing but the timestamp changed. */
-const sameContent = (a: ResourceStats, b: ResourceStats) =>
-  a.status === b.status &&
-  a.reason === b.reason &&
-  a.windowSeconds === b.windowSeconds &&
-  isEqual(a.metrics, b.metrics);
+const sameContent = (a: ComponentStats, b: ComponentStats) =>
+  a.phase === b.phase &&
+  a.stale === b.stale &&
+  a.eventsPerSecond === b.eventsPerSecond &&
+  a.averageSeconds === b.averageSeconds &&
+  a.totalEvents === b.totalEvents &&
+  isEqual(a.error, b.error) &&
+  isEqual(a.series, b.series);
 
 const mergeEntries = (
-  current: Record<string, ResourceStats>,
-  incoming: Record<string, ResourceStats>
-): Record<string, ResourceStats> => {
+  current: Record<string, ComponentStats>,
+  incoming: Record<string, ComponentStats>
+): Record<string, ComponentStats> => {
   const next = { ...current };
   let changed = false;
   for (const [key, entry] of Object.entries(incoming)) {
@@ -99,19 +107,21 @@ export const metricsManagerMachine = setup({
   actors: {
     fetchStats: fromPromise<
       StatsFetchResult,
-      { client: StatsClient; resources: StatsResourceRef[]; maxPerRequest: number }
+      { client: StatsClient; components: StatsComponentRef[]; maxPerRequest: number }
     >(async ({ input, signal }) => {
       // One request per chunk. Above the cap this is the safety net. A failed chunk
-      // marks only its resources.
+      // marks only its components.
       const results = await Promise.all(
-        chunk(input.resources, input.maxPerRequest).map((resources) =>
-          input.client.fetchStats({ resources, signal }).catch((error: unknown) => {
+        chunk(input.components, input.maxPerRequest).map((components) =>
+          input.client.fetchStats({ components, signal }).catch((error: unknown) => {
             if (signal.aborted) throw error;
             return {
               entries: entriesForFailure(
-                resources,
-                'unavailable',
-                error instanceof Error ? error.message : 'Stats request failed',
+                components,
+                {
+                  code: 'unavailable',
+                  reason: error instanceof Error ? error.message : 'Stats request failed',
+                },
                 Date.now()
               ),
             };
@@ -123,7 +133,7 @@ export const metricsManagerMachine = setup({
   },
   actions: {
     addRegistration: assign({
-      registrations: ({ context }, params: { ref: StatsResourceRef }) => {
+      registrations: ({ context }, params: { ref: StatsComponentRef }) => {
         const key = statsKey(params.ref);
         const existing = context.registrations[key];
         return {
@@ -133,7 +143,7 @@ export const metricsManagerMachine = setup({
       },
     }),
     removeRegistration: assign({
-      registrations: ({ context }, params: { ref: StatsResourceRef }) => {
+      registrations: ({ context }, params: { ref: StatsComponentRef }) => {
         const key = statsKey(params.ref);
         const existing = context.registrations[key];
         if (!existing || existing.count <= 0) return context.registrations;
@@ -170,7 +180,7 @@ export const metricsManagerMachine = setup({
       const entries = { ...context.entries };
       for (const key of keys) {
         // Only the first load shows `loading`. A refresh keeps the old value.
-        if (!entries[key] || entries[key].status === 'idle') entries[key] = LOADING;
+        if (!entries[key] || entries[key].phase === 'idle') entries[key] = LOADING;
       }
       return {
         entries,
@@ -190,9 +200,13 @@ export const metricsManagerMachine = setup({
         for (const key of context.inFlight) {
           const old = next[key];
           next[key] =
-            old && (old.status === 'ready' || old.status === 'stale')
-              ? { ...old, status: 'stale', reason: params.message }
-              : { status: 'unavailable', metrics: [], reason: params.message };
+            old && old.phase === 'loaded' && !old.error
+              ? { ...old, stale: true }
+              : {
+                  ...IDLE_STATS,
+                  phase: 'loaded',
+                  error: { code: 'unavailable', reason: params.message },
+                };
         }
         return next;
       },
@@ -255,7 +269,7 @@ export const metricsManagerMachine = setup({
         input: ({ context }) => ({
           client: context.client,
           maxPerRequest: context.tuning.maxPerRequest,
-          resources: context.inFlight.map((key) => context.registrations[key].ref),
+          components: context.inFlight.map((key) => context.registrations[key].ref),
         }),
         onDone: {
           target: 'settling',

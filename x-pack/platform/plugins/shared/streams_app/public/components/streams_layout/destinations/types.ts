@@ -28,13 +28,6 @@ export interface DestinationViewModel {
    * Static indexes that omit the entry surface the spec default of `[index]`.
    */
   indexPatterns: string[];
-  /**
-   * The exact index name, only when `config.index` is set explicitly, is not a
-   * template and adds no extra patterns. Auto and templated destinations have none.
-   * `index` above falls back to the destination id when the config omits it, so
-   * it cannot answer this question.
-   */
-  staticIndex?: string;
 }
 
 /** Per-type form state. Each destination type owns its own slice. */

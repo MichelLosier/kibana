@@ -9,109 +9,54 @@ import React, { useMemo } from 'react';
 import { EuiIconTip } from '@elastic/eui';
 import { BarSeries, Chart, ScaleType, Settings, Tooltip, TooltipStickTo } from '@elastic/charts';
 import { useElasticChartsTheme } from '@kbn/charts-theme';
-import useAsync from 'react-use/lib/useAsync';
-import { useKibana } from '../../hooks/use_kibana';
-import {
-  classifyDocsError,
-  DESTINATION_DOCS_RANGE_MS,
-  fetchDestinationDocsHistogram,
-  formatDocsSummary,
-  sumHistogramDocs,
-  type DocsCellState,
-} from './destination_docs';
 import { countRender } from './render_counter';
+import { useRegisterStats, useStatsFor } from './stats_context';
+import type { ComponentStats, StatsComponentRef, StatsSeries } from './types';
 
-interface Point {
-  x: number;
-  doc_count: number;
-}
+export const NO_DOCS_TEXT = '–';
 
-const toPoints = (columns: Array<{ name: string }>, values: unknown[][]): Point[] => {
-  const t = columns.findIndex((c) => c.name === '@timestamp');
-  const c = columns.findIndex((col) => col.name === 'doc_count');
-  if (t < 0 || c < 0) return [];
-  return values.map((row) => ({
-    x: new Date(row[t] as string).getTime(),
-    doc_count: Number(row[c]),
-  }));
+/** Total beneath the bars. The sum of the points, so it agrees with them. */
+export const formatDocsTotal = (stats: ComponentStats): string => {
+  if (stats.phase === 'loading') return '…';
+  if (stats.phase !== 'loaded' || stats.error || stats.totalEvents === null) return NO_DOCS_TEXT;
+  return stats.totalEvents.toLocaleString();
 };
 
 /**
- * Docs cell for a destination with a static index: a histogram of stored documents in
- * the last 15 minutes with the all-time total beneath. It loads on mount, so the data
- * grid fetches only for rows that are on screen. Missing data shows a dash or a warning
- * icon, never zero.
+ * The one chart mapper. Points[i].start becomes x, value becomes y, bucket width becomes
+ * `minInterval` and the response window becomes `xDomain`. A bucket with no documents has
+ * no point and needs no zero fill.
  */
-export const DestinationDocsCell = ({ index }: { index?: string }) => {
-  countRender(`docs:${index ?? 'none'}`);
+export const toChartProps = (series: StatsSeries) => ({
+  data: series.points.map((point) => ({ x: point.x, doc_count: point.value })),
+  xDomain: { min: series.window.start, max: series.window.end, minInterval: series.bucketMs },
+});
+
+/**
+ * Docs cell for a destination: a histogram with the total beneath. It reads the `_stats`
+ * series through the stats manager, so it shares one request with the Throughput column.
+ * No data or an error shows a dash, never zero.
+ */
+export const DestinationDocsCell = ({ id }: { id: string }) => {
+  countRender(`docs:${id}`);
   const chartBaseTheme = useElasticChartsTheme();
-  const {
-    core: { uiSettings },
-    dependencies: {
-      start: {
-        data,
-        streams: { streamsRepositoryClient },
-      },
-    },
-  } = useKibana();
+  const ref = useMemo<StatsComponentRef>(() => ({ kind: 'destination', id }), [id]);
+  const refs = useMemo(() => [ref], [ref]);
+  useRegisterStats(refs);
+  const stats = useStatsFor(ref);
 
-  const result = useAsync(async (): Promise<
-    | { state: DocsCellState; points: Point[]; start: number; end: number; bucketMs: number }
-    | undefined
-  > => {
-    if (!index) return undefined;
-    const controller = new AbortController();
-    try {
-      const [histogram, totals] = await Promise.all([
-        fetchDestinationDocsHistogram({
-          index,
-          search: data.search.search,
-          uiSettings,
-          signal: controller.signal,
-        }),
-        // Resolves to an empty list for an unknown name. It rejects for 403.
-        streamsRepositoryClient
-          .fetch('GET /internal/streams/doc_counts/total', {
-            signal: controller.signal,
-            params: { query: { stream: index } },
-          })
-          .catch(() => undefined),
-      ]);
-      const totalDocs = totals?.find((entry) => entry.stream === index)?.count;
-      return {
-        state: { kind: 'ready', windowDocs: sumHistogramDocs(histogram.response), totalDocs },
-        points: toPoints(histogram.response.columns, histogram.response.values),
-        start: histogram.start,
-        end: histogram.end,
-        bucketMs: histogram.bucketMs,
-      };
-    } catch (error) {
-      return { state: classifyDocsError(error), points: [], start: 0, end: 0, bucketMs: 0 };
-    }
-  }, [index, data.search.search, streamsRepositoryClient, uiSettings]);
-
-  const state: DocsCellState = useMemo(() => {
-    if (!index) return { kind: 'missing', reason: 'no_index' };
-    if (result.loading) return { kind: 'loading' };
-    return result.value?.state ?? { kind: 'missing', reason: 'error' };
-  }, [index, result.loading, result.value]);
-
-  const text = formatDocsSummary(state);
-  const points = result.value?.points ?? [];
+  const chart =
+    stats.series && stats.series.points.length > 0 ? toChartProps(stats.series) : undefined;
 
   return (
-    <div data-test-subj="streamsDestinationDocs" data-docs-state={state.kind}>
+    <div data-test-subj="streamsDestinationDocs" data-stats-phase={stats.phase}>
       <div style={{ height: 20, width: '100%' }}>
-        {state.kind === 'ready' && points.length > 0 && result.value && (
+        {chart && !stats.error && (
           <Chart size={{ width: '100%', height: 20 }}>
             <Settings
               baseTheme={chartBaseTheme}
               theme={{ background: { color: 'transparent' } }}
-              xDomain={{
-                min: result.value.start,
-                max: result.value.end,
-                minInterval: result.value.bucketMs,
-              }}
+              xDomain={chart.xDomain}
               noResults={<div />}
             />
             <Tooltip stickTo={TooltipStickTo.Middle} />
@@ -121,26 +66,24 @@ export const DestinationDocsCell = ({ index }: { index?: string }) => {
               yScaleType={ScaleType.Linear}
               xAccessor="x"
               yAccessors={['doc_count']}
-              data={points}
+              data={chart.data}
               enableHistogramMode
             />
           </Chart>
         )}
       </div>
       <span data-test-subj="streamsDestinationDocsText">
-        {state.kind === 'missing' && state.reason === 'forbidden' ? (
+        {stats.error ? (
           <EuiIconTip
-            content={state.message}
+            content={stats.error.reason}
             type="warning"
             color="warning"
-            aria-label="No access"
+            aria-label={stats.error.code}
           />
         ) : (
-          text
+          formatDocsTotal(stats)
         )}
       </span>
     </div>
   );
 };
-
-export { DESTINATION_DOCS_RANGE_MS };

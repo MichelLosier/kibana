@@ -8,7 +8,7 @@
 import React, { useEffect, useMemo } from 'react';
 import { createActorContext } from '@xstate/react';
 import { metricsManagerMachine } from './metrics_manager_machine';
-import type { ResourceStats, StatsClient, StatsResourceRef } from './types';
+import type { ComponentStats, StatsClient, StatsComponentRef } from './types';
 import { isStatsDebug } from './render_counter';
 import { IDLE_STATS, statsKey } from './types';
 
@@ -34,12 +34,12 @@ const DebugLogger = () => {
           state: snapshot.value,
           requests: snapshot.context.requestCount,
           registered: Object.values(snapshot.context.registrations).map(
-            (r) => `${r.ref.type}:${r.ref.id}x${r.count}`
+            (r) => `${r.ref.kind}:${r.ref.id}x${r.count}`
           ),
           entries: Object.fromEntries(
             Object.entries(snapshot.context.entries).map(([key, entry]) => [
               key.replace(/\u0000/g, '/'),
-              entry.status,
+              entry.error ? `error:${entry.error.code}` : entry.phase,
             ])
           ),
         });
@@ -69,13 +69,13 @@ export const StatsManagerProvider = ({
 };
 
 /** Select one slice. A stable `IDLE_STATS` reference stops renders for unknown keys. */
-export const useStatsFor = (ref: StatsResourceRef): ResourceStats => {
+export const useStatsFor = (ref: StatsComponentRef): ComponentStats => {
   const key = statsKey(ref);
   return StatsManagerContext.useSelector((snapshot) => snapshot.context.entries[key] ?? IDLE_STATS);
 };
 
 /** Registers refs while mounted. Several components may register the same ref. */
-export const useRegisterStats = (refs: StatsResourceRef[]) => {
+export const useRegisterStats = (refs: StatsComponentRef[]) => {
   const actorRef = StatsManagerContext.useActorRef();
   // Re-run only when the set of keys changes, not on every new array.
   const keys = refs.map(statsKey).join('\u0001');

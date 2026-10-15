@@ -8,12 +8,12 @@
 import { createActor } from 'xstate';
 import { createFixtureStatsClient } from './fixture_stats_client';
 import { metricsManagerMachine } from './metrics_manager_machine';
-import type { StatsClient, StatsResourceRef } from './types';
+import type { StatsClient, StatsComponentRef } from './types';
 import { IDLE_STATS, statsKey } from './types';
 
-const prod: StatsResourceRef = { type: 'destination', id: 'es-prod' };
-const dev: StatsResourceRef = { type: 'destination', id: 'es-dev' };
-const step: StatsResourceRef = { type: 'step', id: 'uppercase-message' };
+const prod: StatsComponentRef = { kind: 'destination', id: 'es-prod' };
+const dev: StatsComponentRef = { kind: 'destination', id: 'es-dev' };
+const step: StatsComponentRef = { kind: 'processor', id: 'uppercase-message' };
 
 const start = (client: StatsClient) => {
   const actor = createActor(metricsManagerMachine, {
@@ -38,14 +38,23 @@ describe('metrics manager machine', () => {
     actor.send({ type: 'resource.register', ref: step });
     expect(actor.getSnapshot().value).toBe('pooling');
     await flush(100);
-    expect(actor.getSnapshot().context.entries[statsKey(prod)].status).toBe('loading');
+    expect(actor.getSnapshot().context.entries[statsKey(prod)].phase).toBe('loading');
     await flush(60);
     expect(client.calls).toEqual([{ count: 3 }]);
     expect(actor.getSnapshot().value).toBe('idle');
     const { entries } = actor.getSnapshot().context;
-    expect(entries[statsKey(prod)].status).toBe('ready');
-    expect(entries[statsKey(dev)].status).toBe('no_data');
-    expect(entries[statsKey(step)].windowSeconds).toBe(900);
+    expect(entries[statsKey(prod)]).toMatchObject({
+      phase: 'loaded',
+      eventsPerSecond: 18.4,
+      totalEvents: 16560,
+    });
+    expect(entries[statsKey(dev)]).toMatchObject({
+      phase: 'loaded',
+      eventsPerSecond: null,
+      totalEvents: null,
+    });
+    expect(entries[statsKey(dev)].error).toBeUndefined();
+    expect(entries[statsKey(step)]).toMatchObject({ eventsPerSecond: 3.7, averageSeconds: 0.008 });
   });
 
   it('does not refetch a registered resource that has data, and counts registrations', async () => {
@@ -85,22 +94,20 @@ describe('metrics manager machine', () => {
     await flush(1001);
     expect(actor.getSnapshot().context.registrations[statsKey(prod)]).toBeUndefined();
     // The cache stays after release.
-    expect(actor.getSnapshot().context.entries[statsKey(prod)].status).toBe('ready');
+    expect(actor.getSnapshot().context.entries[statsKey(prod)].phase).toBe('loaded');
   });
 
-  it('maps forbidden and unknown statuses without showing ready', async () => {
+  it('keeps component errors and unknown codes, and never invents numbers', async () => {
     const actor = start(createFixtureStatsClient());
-    const forbidden: StatsResourceRef = { type: 'destination', id: 'forbidden' };
-    const future: StatsResourceRef = { type: 'destination', id: 'future-status' };
+    const forbidden: StatsComponentRef = { kind: 'destination', id: 'forbidden' };
+    const future: StatsComponentRef = { kind: 'destination', id: 'future-code' };
     actor.send({ type: 'resource.register', ref: forbidden });
     actor.send({ type: 'resource.register', ref: future });
     await flush(101);
     const { entries } = actor.getSnapshot().context;
-    expect(entries[statsKey(forbidden)].status).toBe('forbidden');
-    expect(entries[statsKey(future)]).toMatchObject({
-      status: 'unavailable',
-      reason: 'a_future_status',
-    });
+    expect(entries[statsKey(forbidden)].error?.code).toBe('forbidden');
+    expect(entries[statsKey(future)].error?.code).toBe('a_future_code');
+    expect(entries[statsKey(future)].eventsPerSecond).toBeNull();
   });
 
   it('marks resources unavailable when the client throws, and does not loop', async () => {
@@ -110,8 +117,9 @@ describe('metrics manager machine', () => {
     await flush(500);
     expect(fetchStats).toHaveBeenCalledTimes(1);
     expect(actor.getSnapshot().context.entries[statsKey(prod)]).toMatchObject({
-      status: 'unavailable',
-      reason: 'network down',
+      phase: 'loaded',
+      eventsPerSecond: null,
+      error: { code: 'unavailable', reason: 'network down' },
     });
     expect(actor.getSnapshot().value).toBe('idle');
   });
@@ -124,7 +132,7 @@ describe('metrics manager machine', () => {
     actor.send({ type: 'resource.register', ref: dev });
     await flush(1000);
     expect(client.calls).toEqual([{ count: 1 }, { count: 1 }]);
-    expect(actor.getSnapshot().context.entries[statsKey(dev)].status).toBe('no_data');
+    expect(actor.getSnapshot().context.entries[statsKey(dev)].phase).toBe('loaded');
   });
 
   it('chunks above the per-request cap', async () => {
@@ -133,13 +141,27 @@ describe('metrics manager machine', () => {
       input: { client, tuning: { poolWindowMs: 10, maxPerRequest: 2 } },
     }).start();
     for (const id of ['a', 'b', 'c', 'd', 'e']) {
-      actor.send({ type: 'resource.register', ref: { type: 'destination', id } });
+      actor.send({ type: 'resource.register', ref: { kind: 'destination', id } });
     }
     await flush(50);
     expect(client.calls.map((call) => call.count).sort()).toEqual([1, 2, 2]);
   });
 
+  it('applies a response-level error to every component', async () => {
+    const client = createFixtureStatsClient({
+      responseError: { code: 'forbidden', reason: 'No access.' },
+    });
+    const actor = start(client);
+    actor.send({ type: 'resource.register', ref: prod });
+    actor.send({ type: 'resource.register', ref: step });
+    await flush(101);
+    const { entries } = actor.getSnapshot().context;
+    expect(entries[statsKey(prod)].error?.code).toBe('forbidden');
+    expect(entries[statsKey(step)].error?.code).toBe('forbidden');
+    expect(entries[statsKey(prod)].eventsPerSecond).toBeNull();
+  });
+
   it('exposes a stable idle slice for unknown keys', () => {
-    expect(IDLE_STATS.status).toBe('idle');
+    expect(IDLE_STATS.phase).toBe('idle');
   });
 });

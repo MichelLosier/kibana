@@ -40,39 +40,7 @@ describe('destination models', () => {
         type: 'elasticsearch',
         index: 'logs-prod',
         indexPatterns: ['logs-prod'],
-        staticIndex: 'logs-prod',
       },
-    ]);
-  });
-
-  it('reports a static index only for an explicit, untemplated, single-index destination', () => {
-    const es = (id: string, config?: Array<{ name: string; value: unknown }>) => ({
-      id,
-      type: 'elasticsearch' as const,
-      supported_telemetry: ['logs' as const],
-      ...(config ? { config } : {}),
-    });
-    const unit: StreamsUnit.GetResponse = {
-      unit: {
-        sources: [],
-        pipelines: [],
-        destinations: [
-          es('static', [{ name: 'index', value: 'logs-application.otel-prod' }]),
-          es('templated', [{ name: 'index', value: 'logs-{{ env }}' }]),
-          es('wide', [
-            { name: 'index', value: 'logs-a' },
-            { name: 'index_patterns', value: ['logs-*'] },
-          ]),
-          es('omitted'),
-        ],
-      },
-      ui_metadata: {},
-    };
-    expect(getConfiguredDestinations(unit).map((d) => [d.id, d.staticIndex])).toEqual([
-      ['static', 'logs-application.otel-prod'],
-      ['templated', undefined],
-      ['wide', undefined],
-      ['omitted', undefined],
     ]);
   });
 

@@ -8,48 +8,47 @@
 import {
   formatDuration,
   formatEventsPerSecond,
-  getAverageDurationSeconds,
+  getAverageSeconds,
   getEventsPerSecond,
 } from './derived';
-import { createFixtureStatsClient } from './fixture_stats_client';
-import { fromWireResponse, toWireRequest } from './map_stats_response';
+import { formatDocsTotal, toChartProps } from './destination_docs_cell';
+import { createFixtureStatsClient, fixtureStatsResponse } from './fixture_stats_client';
+import { entriesForFailure, fromWireResponse, toWireRequest } from './map_stats_response';
 import { createStatsClient } from './stats_client';
 import { formatStatsText } from './stats_text';
-import type { ResourceStats } from './types';
-import { statsKey } from './types';
+import type { ComponentStats, StatsComponentRef } from './types';
+import { IDLE_STATS, statsKey } from './types';
 
-const fixtureEntry = async (type: 'destination' | 'step', id: string): Promise<ResourceStats> => {
+const fixtureEntry = async (
+  kind: 'destination' | 'processor',
+  id: string
+): Promise<ComponentStats> => {
   const client = createFixtureStatsClient();
   const { entries } = await client.fetchStats({
-    resources: [{ type, id }],
+    components: [{ kind, id }],
     signal: new AbortController().signal,
   });
-  return entries[statsKey({ type, id })];
+  return entries[statsKey({ kind, id })];
 };
 
-describe('derived stats', () => {
-  it('computes eps and average duration for a step (out direction)', async () => {
-    const stats = await fixtureEntry('step', 'uppercase-message');
-    expect(formatEventsPerSecond(getEventsPerSecond(stats, 'step')!)).toBe('3.7 eps');
-    expect(formatDuration(getAverageDurationSeconds(stats)!)).toBe('8ms');
+describe('derived stats (no division in the UI)', () => {
+  it('reads the server rate and the seconds for a processor', async () => {
+    const stats = await fixtureEntry('processor', 'uppercase-message');
+    expect(formatEventsPerSecond(getEventsPerSecond(stats)!)).toBe('3.7 eps');
+    expect(formatDuration(getAverageSeconds(stats)!)).toBe('8ms');
   });
 
-  it('counts only delivered items for a destination', async () => {
+  it('reads the server rate and latency for a destination', async () => {
     const stats = await fixtureEntry('destination', 'es-prod');
-    // 16,560 success items over 900 s. The 12 failures are not counted.
-    expect(getEventsPerSecond(stats, 'destination')).toBeCloseTo(18.4, 1);
-    expect(formatDuration(getAverageDurationSeconds(stats)!)).toBe('15ms');
+    expect(getEventsPerSecond(stats)).toBe(18.4);
+    expect(formatDuration(getAverageSeconds(stats)!)).toBe('15ms');
   });
 
-  it('returns undefined for no_data so the UI shows a dash, and keeps a real zero', async () => {
+  it('returns undefined for null values so the UI shows a dash, and keeps a real zero', async () => {
     const empty = await fixtureEntry('destination', 'es-dev');
-    expect(getEventsPerSecond(empty, 'destination')).toBeUndefined();
-    const zero: ResourceStats = {
-      status: 'ready',
-      windowSeconds: 900,
-      metrics: [{ name: 'items', aggregation: 'sum', value: 0, unit: '{item}' }],
-    };
-    expect(getEventsPerSecond(zero, 'destination')).toBe(0);
+    expect(getEventsPerSecond(empty)).toBeUndefined();
+    expect(getAverageSeconds(empty)).toBeUndefined();
+    expect(getEventsPerSecond({ ...IDLE_STATS, phase: 'loaded', eventsPerSecond: 0 })).toBe(0);
   });
 
   it.each([
@@ -75,66 +74,139 @@ describe('derived stats', () => {
   });
 });
 
+describe('formatStatsText', () => {
+  it.each(['forbidden', 'unavailable', 'unsupported', 'not_found', 'error', 'a_future_code'])(
+    'shows a dash for error code %s, never a number',
+    (code) => {
+      expect(
+        formatStatsText({
+          ...IDLE_STATS,
+          phase: 'loaded',
+          eventsPerSecond: 5,
+          averageSeconds: 0.1,
+          error: { code, reason: 'x' },
+        })
+      ).toBe('–');
+    }
+  );
+
+  it('shows a dash for idle and null values, and an ellipsis while loading', () => {
+    expect(formatStatsText(IDLE_STATS)).toBe('–');
+    expect(formatStatsText({ ...IDLE_STATS, phase: 'loaded' })).toBe('–');
+    expect(formatStatsText({ ...IDLE_STATS, phase: 'loading' })).toBe('…');
+  });
+
+  it('shows rate only for the table column', async () => {
+    const stats = await fixtureEntry('processor', 'uppercase-message');
+    expect(formatStatsText(stats, { rate: true })).toBe('3.7 eps');
+    expect(formatStatsText(stats)).toBe('3.7 eps · 8ms');
+  });
+});
+
+describe('docs cell helpers', () => {
+  it('formats the total and maps the series to chart props', async () => {
+    const stats = await fixtureEntry('destination', 'es-prod');
+    expect(formatDocsTotal(stats)).toBe('16,560');
+    const chart = toChartProps(stats.series!);
+    expect(chart.data).toHaveLength(15);
+    expect(chart.data[0]).toEqual({ x: Date.parse('2026-10-14T11:45:00.000Z'), doc_count: 1104 });
+    expect(chart.xDomain).toEqual({
+      min: Date.parse('2026-10-14T11:45:00.000Z'),
+      max: Date.parse('2026-10-14T12:00:00.000Z'),
+      minInterval: 60_000,
+    });
+    // The total is the sum of the points.
+    expect(chart.data.reduce((sum, point) => sum + point.doc_count, 0)).toBe(stats.totalEvents);
+  });
+
+  it('shows a dash with no data or an error, never zero', async () => {
+    expect(formatDocsTotal(await fixtureEntry('destination', 'es-dev'))).toBe('–');
+    expect(formatDocsTotal(await fixtureEntry('destination', 'forbidden'))).toBe('–');
+    expect(formatDocsTotal({ ...IDLE_STATS, phase: 'loading' })).toBe('…');
+  });
+});
+
 describe('wire mapper', () => {
-  it('renames step to processor and sends pipeline_id only when set', () => {
+  it('sends only kind and id', () => {
     expect(
       toWireRequest([
-        { type: 'step', id: 'a' },
-        { type: 'step', id: 'a', pipelineId: 'main-route-0' },
-        { type: 'destination', id: 'es-prod' },
+        { kind: 'processor', id: 'a' },
+        { kind: 'destination', id: 'es-prod' },
       ])
     ).toEqual({
-      resources: [
+      components: [
         { kind: 'processor', id: 'a' },
-        { kind: 'processor', id: 'a', pipeline_id: 'main-route-0' },
         { kind: 'destination', id: 'es-prod' },
       ],
     });
   });
 
-  it('keys placements apart and ignores unknown kinds', () => {
+  it('keys by kind and id, so one id in two kinds never collides', () => {
+    expect(statsKey({ kind: 'destination', id: 'x' })).not.toBe(
+      statsKey({ kind: 'processor', id: 'x' })
+    );
+  });
+
+  it('reads ids with own-property checks (an id like constructor is valid)', () => {
+    const requested: StatsComponentRef[] = [{ kind: 'destination', id: 'constructor' }];
     const entries = fromWireResponse(
-      {
-        meta: { window: { start: '2026-10-14T00:00:00Z', end: '2026-10-14T00:15:00Z' } },
-        results: [
-          { kind: 'processor', id: 'a', status: 'ok', metrics: [] },
-          { kind: 'processor', id: 'a', pipeline_id: 'p', status: 'no_data', metrics: [] },
-          { kind: 'source', id: 'x', status: 'ok', metrics: [] },
-        ],
-      },
+      fixtureStatsResponse([{ kind: 'destination', id: 'es-dev' }]),
+      requested,
       1
     );
-    expect(Object.keys(entries)).toHaveLength(2);
-    expect(entries[statsKey({ type: 'step', id: 'a' })].status).toBe('ready');
-    expect(entries[statsKey({ type: 'step', id: 'a', pipelineId: 'p' })].status).toBe('no_data');
+    expect(entries[statsKey(requested[0])].error?.code).toBe('error');
+  });
+
+  it('copies a response-level error onto every component and keeps own errors', () => {
+    const requested: StatsComponentRef[] = [
+      { kind: 'destination', id: 'es-prod' },
+      { kind: 'processor', id: 'not-in-unit' },
+    ];
+    const entries = fromWireResponse(
+      fixtureStatsResponse(requested, { code: 'unavailable', reason: 'Stream missing.' }),
+      requested,
+      1
+    );
+    expect(entries[statsKey(requested[0])].error?.code).toBe('unavailable');
+    expect(entries[statsKey(requested[1])].error?.code).toBe('not_found');
+  });
+
+  it('marks every component with one error on a whole-call failure', () => {
+    const entries = entriesForFailure(
+      [{ kind: 'destination', id: 'a' }],
+      { code: 'forbidden', reason: 'x' },
+      1
+    );
+    expect(entries[statsKey({ kind: 'destination', id: 'a' })]).toMatchObject({
+      phase: 'loaded',
+      eventsPerSecond: null,
+      error: { code: 'forbidden' },
+    });
   });
 });
 
 describe('real client', () => {
-  const resources = [{ type: 'destination' as const, id: 'es-prod' }];
+  const components: StatsComponentRef[] = [{ kind: 'destination', id: 'es-prod' }];
   const signal = new AbortController().signal;
 
   it('posts to the typed route with the wire body', async () => {
-    const fetch = jest.fn().mockResolvedValue({
-      meta: { window: { start: '2026-10-14T00:00:00Z', end: '2026-10-14T00:15:00Z' } },
-      results: [{ kind: 'destination', id: 'es-prod', status: 'ok', metrics: [] }],
-    });
+    const fetch = jest.fn().mockResolvedValue(fixtureStatsResponse(components));
     const client = createStatsClient({ streamsRepositoryClient: { fetch } as never });
-    const { entries } = await client.fetchStats({ resources, signal });
+    const { entries } = await client.fetchStats({ components, signal });
     expect(fetch).toHaveBeenCalledWith('POST /internal/streams/unit/{id}/_stats', {
       signal,
       params: {
         path: { id: 'default' },
-        body: { resources: [{ kind: 'destination', id: 'es-prod' }] },
+        body: { components: [{ kind: 'destination', id: 'es-prod' }] },
       },
     });
-    expect(entries[statsKey(resources[0])].status).toBe('ready');
+    expect(entries[statsKey(components[0])].eventsPerSecond).toBe(18.4);
   });
 
   it.each([
     [403, 'forbidden'],
     [501, 'unavailable'],
-  ])('maps HTTP %p to %p for every resource', async (statusCode, status) => {
+  ])('maps HTTP %p to error code %p for every component', async (statusCode, code) => {
     const error = Object.assign(new Error('x'), {
       name: 'FetchError',
       request: {},
@@ -142,28 +214,8 @@ describe('real client', () => {
     });
     const fetch = jest.fn().mockRejectedValue(error);
     const client = createStatsClient({ streamsRepositoryClient: { fetch } as never });
-    const { entries } = await client.fetchStats({ resources, signal });
-    expect(entries[statsKey(resources[0])].status).toBe(status);
-  });
-});
-
-describe('formatStatsText', () => {
-  const base = { metrics: [] as never[] };
-
-  it.each(['no_data', 'unavailable', 'forbidden', 'idle', 'a_future_status'])(
-    'shows a dash for %s, never zero',
-    (status) => {
-      expect(formatStatsText({ ...base, status }, 'destination')).toBe('–');
-    }
-  );
-
-  it('shows an ellipsis while loading', () => {
-    expect(formatStatsText({ ...base, status: 'loading' }, 'destination')).toBe('…');
-  });
-
-  it('shows rate only for the table column', async () => {
-    const stats = await fixtureEntry('step', 'uppercase-message');
-    expect(formatStatsText(stats, 'step', { rate: true })).toBe('3.7 eps');
-    expect(formatStatsText(stats, 'step')).toBe('3.7 eps · 8ms');
+    const { entries } = await client.fetchStats({ components, signal });
+    expect(entries[statsKey(components[0])].error?.code).toBe(code);
+    expect(entries[statsKey(components[0])].eventsPerSecond).toBeNull();
   });
 });

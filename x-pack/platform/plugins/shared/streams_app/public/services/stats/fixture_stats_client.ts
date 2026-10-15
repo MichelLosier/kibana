@@ -9,89 +9,112 @@ import type { StreamsUnit } from '@kbn/streams-schema';
 import { fromWireResponse, toWireRequest } from './map_stats_response';
 import type { StatsClient } from './types';
 
-const WINDOW = {
-  start: '2026-10-14T11:45:00.000Z',
-  end: '2026-10-14T12:00:00.000Z',
+const WINDOW = { start: '2026-10-14T11:45:00.000Z', end: '2026-10-14T12:00:00.000Z' };
+const RATE_UNIT = '{item}/s';
+
+const noDestination = (error?: StreamsUnit.StatsError): StreamsUnit.StatsDestinationResult => ({
+  ...(error ? { error } : {}),
+  latency: { average: { value: null } },
+  events: {
+    incoming: {
+      total: { value: null },
+      rate: { value: null, unit: RATE_UNIT },
+      series: { bucket_ms: 60_000, points: [] },
+    },
+  },
+});
+
+const noProcessor = (error?: StreamsUnit.StatsError): StreamsUnit.StatsProcessorResult => ({
+  ...(error ? { error } : {}),
+  processing_duration: { average: { value: null } },
+  events: { incoming: { rate: { value: null, unit: RATE_UNIT } } },
+});
+
+/** 15 one minute points of 1,104 items: a total of 16,560 over 900 s is 18.4 eps. */
+const series15 = {
+  bucket_ms: 60_000,
+  points: Array.from({ length: 15 }, (_, i) => ({
+    start: new Date(Date.parse(WINDOW.start) + i * 60_000).toISOString(),
+    value: 1104,
+  })),
 };
 
-const metric = (
-  name: string,
-  aggregation: string,
-  value: number,
-  unit: string,
-  dimensions?: Record<string, string>
-): StreamsUnit.StatsMetric => ({
-  name,
-  aggregation,
-  value,
-  unit,
-  ...(dimensions ? { dimensions } : {}),
-});
-
 /**
- * Wire-shaped fixtures for the demo unit, passed through the same mapper as
- * real responses. 900 s window: 3,330 items is 3.7 eps, and a destination
- * with 16,560 items is 18.4 eps.
+ * Wire-shaped fixture response, passed through the same mapper as a real response.
+ * Special ids: `es-dev` and `empty` have no data, `forbidden` and `future-code` carry
+ * a component error, and `not-in-unit` is `not_found`.
  */
 export const fixtureStatsResponse = (
-  resources: StreamsUnit.StatsResourceRef[]
-): StreamsUnit.StatsResponse => ({
-  meta: { window: WINDOW, config_hash: 'fixture', sampled: false, truncated: false },
-  results: resources.map((ref): StreamsUnit.StatsResourceResult => {
-    if (ref.id === 'es-dev' || ref.id === 'empty') {
-      return { kind: ref.kind, id: ref.id, status: 'no_data', metrics: [] };
+  components: StreamsUnit.StatsComponentRef[],
+  responseError?: StreamsUnit.StatsError
+): StreamsUnit.StatsResponse => {
+  const destinations: StreamsUnit.StatsResponse['components']['destinations'] = {};
+  const processors: StreamsUnit.StatsResponse['components']['processors'] = {};
+
+  const errorFor = (id: string): StreamsUnit.StatsError | undefined =>
+    id === 'forbidden'
+      ? { code: 'forbidden', reason: 'The current user cannot read the stats stream.' }
+      : id === 'future-code'
+      ? { code: 'a_future_code', reason: 'Something new went wrong.' }
+      : id === 'not-in-unit'
+      ? { code: 'not_found', reason: 'No component with this id in the unit.' }
+      : undefined;
+  const quiet = (id: string) => responseError !== undefined || ['es-dev', 'empty'].includes(id);
+
+  for (const { kind, id } of components) {
+    const error = errorFor(id);
+    if (kind === 'destination') {
+      destinations[id] =
+        error || quiet(id)
+          ? noDestination(error)
+          : {
+              latency: { average: { value: 0.015 } },
+              events: {
+                incoming: {
+                  total: { value: 16560 },
+                  rate: { value: 18.4, unit: RATE_UNIT },
+                  series: series15,
+                },
+              },
+            };
+    } else {
+      processors[id] =
+        error || quiet(id)
+          ? noProcessor(error)
+          : {
+              processing_duration: { average: { value: 0.008 } },
+              events: { incoming: { rate: { value: 3.7, unit: RATE_UNIT } } },
+            };
     }
-    if (ref.id === 'forbidden') {
-      return { kind: ref.kind, id: ref.id, status: 'forbidden', metrics: [] };
-    }
-    if (ref.id === 'future-status') {
-      return { kind: ref.kind, id: ref.id, status: 'a_future_status', metrics: [] };
-    }
-    if (ref.kind === 'destination') {
-      return {
-        kind: ref.kind,
-        id: ref.id,
-        status: 'ok',
-        metrics: [
-          metric('items', 'sum', 16560, '{item}', { outcome: 'success' }),
-          metric('items', 'sum', 12, '{item}', { outcome: 'failure' }),
-          metric('bytes', 'sum', 9120456, 'By'),
-          metric('duration', 'avg', 0.015, 's'),
-          metric('duration', 'max', 0.04, 's'),
-          metric('duration', 'p95', 0.031, 's'),
-        ],
-      };
-    }
-    return {
-      kind: ref.kind,
-      id: ref.id,
-      ...(ref.pipeline_id ? { pipeline_id: ref.pipeline_id } : {}),
-      status: 'ok',
-      metrics: [
-        metric('items', 'sum', 3330, '{item}', { direction: 'in', outcome: 'success' }),
-        metric('items', 'sum', 3330, '{item}', { direction: 'out', outcome: 'success' }),
-        metric('bytes', 'sum', 1807938, 'By', { direction: 'out', outcome: 'success' }),
-        metric('duration', 'avg', 0.008, 's'),
-      ],
-    };
-  }),
-});
+  }
+
+  return {
+    ...(responseError ? { error: responseError } : {}),
+    components: { destinations, processors },
+    meta: { window: WINDOW, config_hash: 'fixture' },
+  };
+};
 
 export const createFixtureStatsClient = ({
   delayMs = 0,
-}: { delayMs?: number } = {}): StatsClient & { calls: Array<{ count: number }> } => {
+  responseError,
+}: { delayMs?: number; responseError?: StreamsUnit.StatsError } = {}): StatsClient & {
+  calls: Array<{ count: number }>;
+} => {
   const calls: Array<{ count: number }> = [];
   return {
     calls,
-    fetchStats: async ({ resources, signal }) => {
-      calls.push({ count: resources.length });
+    fetchStats: async ({ components, signal }) => {
+      calls.push({ count: components.length });
       if (delayMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
       signal.throwIfAborted();
+      const wire = toWireRequest(components).components ?? [];
       return {
         entries: fromWireResponse(
-          fixtureStatsResponse(toWireRequest(resources).resources ?? []),
+          fixtureStatsResponse(wire, responseError),
+          components,
           Date.now()
         ),
       };

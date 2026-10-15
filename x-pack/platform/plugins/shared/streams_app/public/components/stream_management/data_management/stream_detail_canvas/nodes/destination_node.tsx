@@ -78,7 +78,7 @@ export function DestinationNode({ data, selected, dragging }: NodeProps<Destinat
             {data.destinationId && !isUnconfigured && (
               // Stats are read in a child through the manager. They never enter node data.
               <EuiText size="s" color="subdued" data-test-subj="streamsCanvasDestinationStats">
-                <StatsText type="destination" id={data.destinationId} />
+                <StatsText kind="destination" id={data.destinationId} />
               </EuiText>
             )}
           </div>

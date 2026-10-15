@@ -156,14 +156,14 @@ export const DestinationsGrid = ({
         );
       }
       if (columnId === 'docs') {
-        // Static-index destinations only. Auto and templated destinations show a dash.
-        return <DestinationDocsCell index={destination.staticIndex} />;
+        // Metrics path: works for every destination, whatever its index mode.
+        return <DestinationDocsCell id={destination.id} />;
       }
       if (columnId === 'throughput') {
         // Mounted only for rows on the current page, so the hook registers only those ids.
         return (
           <StatsText
-            type="destination"
+            kind="destination"
             id={destination.id}
             parts={{ rate: true }}
             debugLabel="table"
