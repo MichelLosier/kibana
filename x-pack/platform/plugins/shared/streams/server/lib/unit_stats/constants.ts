@@ -8,10 +8,10 @@
 /**
  * Stream, field names and the window for unit stats, in one place.
  *
- * The stream was renamed on Oct 12 (it was `metrics-streams.metrics.otel-default`).
- * Verified on the local stack on Oct 14: the old name does not exist, the new
- * stream is not hidden, and the resource attributes are dotted (`unit.id`).
- * The old `unit_id` is still accepted in the unit id filter for older data.
+ * Verified on the local stack on Oct 14: the stream is `metrics-streams.otel-default`
+ * (not hidden), resource attributes are dotted (`unit.id`), and each document is a
+ * delta over `start_timestamp` to `@timestamp` (10 s locally). The old `unit_id` is
+ * still accepted in the unit id filter for older data.
  */
 
 /** Query the exact name. A wildcard hides both a 403 and a missing stream. */
@@ -26,36 +26,26 @@ export const UNIT_ID_FIELDS = ['resource.attributes.unit.id', 'resource.attribut
 export const CONFIG_HASH_FIELD = 'resource.attributes.streams.config.hash';
 
 export const TIMESTAMP_FIELD = '@timestamp';
-
-export const OUTCOME_FIELD = 'attributes.outcome';
-
-export const DESTINATION_ID_FIELD = 'attributes.streams.destination.id';
+export const START_TIMESTAMP_FIELD = 'start_timestamp';
 
 export const DIRECTION_FIELD = 'attributes.direction';
-export const PIPELINE_ID_FIELD = 'attributes.streams.pipeline.id';
-export const STEP_ID_FIELD = 'attributes.streams.step.id';
 
+export const DESTINATION_ID_FIELD = 'attributes.streams.destination.id';
 export const DESTINATION_ITEMS_FIELD = 'metrics.streams.destination.items';
-export const DESTINATION_BYTES_FIELD = 'metrics.streams.destination.bytes';
-
 export const DESTINATION_DURATION_FIELD = 'metrics.streams.destination.duration';
 
+/** The telemetry calls a processor a step. */
+export const STEP_ID_FIELD = 'attributes.streams.step.id';
 export const STEP_ITEMS_FIELD = 'metrics.streams.step.items';
-export const STEP_BYTES_FIELD = 'metrics.streams.step.bytes';
 export const STEP_DURATION_FIELD = 'metrics.streams.step.duration';
 
 /** Destination types that emit user-facing metrics (ADR 348, decision 4). */
 export const DESTINATION_TYPES_WITH_STATS = ['elasticsearch'];
 
-/** The server sets the unit. The sample mixes `1` and `{item}` for items. */
-export const METRIC_UNITS = {
-  items: '{item}',
-  bytes: 'By',
-  duration: 's',
-} as const;
+/** Same target as the classic Streams histograms (`STREAMS_HISTOGRAM_NUM_DATA_POINTS`). */
+export const SERIES_TARGET_POINTS = 25;
 
-/** Cap on distinct direction values per step. */
-export const MAX_DIRECTION_BUCKETS = 5;
+/** The export interval. A bucket is never narrower. */
+export const SERIES_MIN_BUCKET_MS = 10_000;
 
-/** Cap on distinct outcome values per resource. */
-export const MAX_OUTCOME_BUCKETS = 20;
+export const RATE_UNIT = '{item}/s';

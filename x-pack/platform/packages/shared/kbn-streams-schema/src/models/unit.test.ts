@@ -6,7 +6,6 @@
  */
 
 import {
-  STREAMS_UNIT_STATS_MAX_RESOURCES,
   collectUnitComponentIds,
   findDuplicateUnitComponentIds,
   streamsUnitSchema,
@@ -120,13 +119,16 @@ describe('streams unit stats schemas', () => {
     expect(streamsUnitStatsRequestSchema.parse({})).toEqual({});
   });
 
-  it('accepts a request with filter and resources', () => {
+  it('accepts components, a hash and a time range', () => {
     expect(() =>
       streamsUnitStatsRequestSchema.parse({
-        filter: { config_hash: 'abc' },
-        resources: [
+        filter: {
+          config_hash: 'abc',
+          time_range: { start: '2026-10-15T12:00:00.000Z', end: '2026-10-15T13:00:00.000Z' },
+        },
+        components: [
           { kind: 'destination', id: 'es-prod' },
-          { kind: 'processor', id: 'uppercase-message', pipeline_id: 'main' },
+          { kind: 'processor', id: 'uppercase-message' },
         ],
       })
     ).not.toThrow();
@@ -134,45 +136,66 @@ describe('streams unit stats schemas', () => {
 
   it.each([
     ['unknown top-level field', { time_windw: 1 }],
-    ['unknown resource kind', { resources: [{ kind: 'source', id: 'a' }] }],
-    ['invalid resource id', { resources: [{ kind: 'destination', id: 'Not_Valid' }] }],
-    ['unknown resource field', { resources: [{ kind: 'destination', id: 'a', extra: 1 }] }],
-    ['unknown filter field', { filter: { time_range: {} } }],
+    ['the old resources field', { resources: [] }],
+    ['unknown kind', { components: [{ kind: 'source', id: 'a' }] }],
+    ['invalid id', { components: [{ kind: 'destination', id: 'Not_Valid' }] }],
+    ['pipeline_id', { components: [{ kind: 'processor', id: 'a', pipeline_id: 'main' }] }],
+    ['unknown filter field', { filter: { series: true } }],
     ['empty config hash', { filter: { config_hash: '' } }],
     [
-      'too many resources',
+      'time_range with one bound',
+      { filter: { time_range: { start: '2026-10-15T12:00:00.000Z' } } },
+    ],
+    [
+      'time_range that is not ISO',
+      { filter: { time_range: { start: 'yesterday', end: '2026-10-15T12:00:00.000Z' } } },
+    ],
+    [
+      'time_range that ends before it starts',
       {
-        resources: Array.from({ length: STREAMS_UNIT_STATS_MAX_RESOURCES + 1 }, (_, i) => ({
-          kind: 'destination',
-          id: `d${i}`,
-        })),
+        filter: {
+          time_range: { start: '2026-10-15T13:00:00.000Z', end: '2026-10-15T12:00:00.000Z' },
+        },
       },
     ],
   ])('rejects %s', (_name, body) => {
     expect(() => streamsUnitStatsRequestSchema.parse(body)).toThrow();
   });
 
-  it('parses the response example and keeps unknown statuses', () => {
+  it('has no cap on components', () => {
+    expect(() =>
+      streamsUnitStatsRequestSchema.parse({
+        components: Array.from({ length: 500 }, (_, i) => ({ kind: 'destination', id: `d${i}` })),
+      })
+    ).not.toThrow();
+  });
+
+  it('parses a response and keeps an unknown error code', () => {
+    const empty = { events: { incoming: { rate: { value: null, unit: '{item}/s' } } } };
     const parsed = streamsUnitStatsResponseSchema.parse({
-      results: [
-        {
-          kind: 'destination',
-          id: 'es-prod',
-          status: 'ok',
-          metrics: [
-            {
-              name: 'items',
-              aggregation: 'sum',
-              value: 12,
-              unit: '{item}',
-              dimensions: { outcome: 'success' },
+      error: { code: 'a_future_code', reason: 'x' },
+      components: {
+        destinations: {
+          'es-prod': {
+            latency: { average: { value: 0.1 } },
+            events: {
+              incoming: {
+                total: { value: 3 },
+                rate: { value: 0.003, unit: '{item}/s' },
+                series: {
+                  bucket_ms: 60000,
+                  points: [{ start: '2026-10-15T12:00:00.000Z', value: 3 }],
+                },
+              },
             },
-          ],
+          },
         },
-        { kind: 'destination', id: 'es-dev', status: 'a_future_status', metrics: [] },
-      ],
-      meta: { window: { start: '2026-10-13T12:32:00.000Z', end: '2026-10-13T12:47:00.000Z' } },
+        processors: {
+          p: { processing_duration: { average: { value: null } }, ...empty },
+        },
+      },
+      meta: { window: { start: 'a', end: 'b' } },
     });
-    expect(parsed.results[1].status).toBe('a_future_status');
+    expect(parsed.error?.code).toBe('a_future_code');
   });
 });

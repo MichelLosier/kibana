@@ -7,87 +7,60 @@
 
 import { errors } from '@elastic/elasticsearch';
 import type { ElasticsearchClient, Logger } from '@kbn/core/server';
-import { STREAMS_UNIT_STATS_MAX_RESOURCES, type StreamsUnit } from '@kbn/streams-schema';
+import type { StreamsUnit } from '@kbn/streams-schema';
 import { DESTINATION_TYPES_WITH_STATS, UNIT_STATS_WINDOW_MS } from './constants';
 import { buildDestinationStatsRequest } from './build_destination_stats_request';
 import { buildProcessorStatsRequest } from './build_processor_stats_request';
 import {
+  mapDestinationStatsResponse,
+  noDestinationStats,
+  type DestinationStatsAggregations,
+} from './map_destination_stats_response';
+import {
   mapProcessorStatsResponse,
+  noProcessorStats,
   type ProcessorStatsAggregations,
 } from './map_processor_stats_response';
 import {
-  mapDestinationStatsResponse,
-  type DestinationStatsAggregations,
-} from './map_destination_stats_response';
-import { buildConfigHashRequest, readConfigHash } from './resolve_config_hash';
-
-const DEFAULT_SAMPLE_PER_KIND = 25;
-
-const resultFor = (
-  ref: StreamsUnit.StatsResourceRef,
-  status: string,
-  metrics: StreamsUnit.StatsMetric[] = [],
-  reason?: string
-): StreamsUnit.StatsResourceResult => ({
-  kind: ref.kind,
-  id: ref.id,
-  ...(ref.pipeline_id ? { pipeline_id: ref.pipeline_id } : {}),
-  status,
-  metrics,
-  ...(reason ? { error: { reason } } : {}),
-});
+  buildEarliestStartRequest,
+  buildLatestHashRequest,
+  readEarliestStartMs,
+  readLatestHash,
+} from './resolve_config_hash';
+import { getSeriesBucketMs } from './series_bucket';
 
 /**
- * Maps a failed search to a per-resource status. Each case surfaces
- * differently from the client: a 403 is a ResponseError with
- * security_exception, a missing stream is a 404 index_not_found_exception and
- * a timeout is a TimeoutError. Raw Elasticsearch bodies never leave here.
+ * Maps a failed search to an error. Each case surfaces differently from the client: a
+ * 403 is a ResponseError with security_exception, a missing stream is a 404
+ * index_not_found_exception and a timeout is a TimeoutError. Raw Elasticsearch bodies
+ * never leave here.
  */
-export const statusForSearchError = (error: unknown): { status: string; reason?: string } => {
+export const errorForSearchFailure = (error: unknown, what: string): StreamsUnit.StatsError => {
   if (error instanceof errors.TimeoutError) {
-    return { status: 'unavailable', reason: 'The stats query timed out.' };
+    return { code: 'unavailable', reason: `The ${what} query timed out.` };
   }
   if (error instanceof errors.ResponseError) {
     if (error.statusCode === 403) {
-      return { status: 'forbidden', reason: 'The current user cannot read the stats stream.' };
+      return { code: 'forbidden', reason: 'The current user cannot read the stats stream.' };
     }
     if (error.statusCode === 404) {
-      return { status: 'unavailable', reason: 'The stats stream does not exist.' };
+      return { code: 'unavailable', reason: 'The stats stream does not exist.' };
     }
     if (error.statusCode === 429 || error.statusCode === 503) {
-      return { status: 'unavailable', reason: 'Elasticsearch could not serve the stats query.' };
+      return { code: 'unavailable', reason: 'Elasticsearch could not serve the stats query.' };
     }
   }
-  return { status: 'error', reason: 'The stats query failed.' };
+  return { code: 'error', reason: `The ${what} query failed.` };
 };
 
-const refKey = (ref: StreamsUnit.StatsResourceRef) =>
-  `${ref.kind}:${ref.id}:${ref.pipeline_id ?? ''}`;
-
-const dedupe = (refs: StreamsUnit.StatsResourceRef[]) => {
+const dedupe = (refs: StreamsUnit.StatsComponentRef[]) => {
   const seen = new Set<string>();
   return refs.filter((ref) => {
-    const key = refKey(ref);
+    const key = `${ref.kind}:${ref.id}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
-};
-
-const defaultSample = (unit: StreamsUnit.Configuration) => {
-  const destinations = unit.destinations ?? [];
-  const processors = unit.processors ?? [];
-  const resources: StreamsUnit.StatsResourceRef[] = [
-    ...destinations
-      .slice(0, DEFAULT_SAMPLE_PER_KIND)
-      .map((d) => ({ kind: 'destination' as const, id: d.id })),
-    ...processors
-      .slice(0, DEFAULT_SAMPLE_PER_KIND)
-      .map((p) => ({ kind: 'processor' as const, id: p.id })),
-  ];
-  const truncated =
-    destinations.length > DEFAULT_SAMPLE_PER_KIND || processors.length > DEFAULT_SAMPLE_PER_KIND;
-  return { resources, truncated };
 };
 
 export async function getUnitStats({
@@ -105,140 +78,149 @@ export async function getUnitStats({
   logger: Logger;
   now?: Date;
 }): Promise<StreamsUnit.StatsResponse> {
-  const window = {
+  const range = request.filter?.time_range;
+  const window = range ?? {
     start: new Date(now.getTime() - UNIT_STATS_WINDOW_MS).toISOString(),
     end: now.toISOString(),
   };
+  const bucketMs = getSeriesBucketMs(Date.parse(window.end) - Date.parse(window.start));
 
-  const sampled = request.resources === undefined;
-  const sample = sampled ? defaultSample(unit) : undefined;
-  const refs = dedupe(sample?.resources ?? request.resources ?? []);
+  const destinationConfigs = new Map((unit.destinations ?? []).map((d) => [d.id, d]));
+  const processorConfigs = new Map((unit.processors ?? []).map((p) => [p.id, p]));
 
-  const destinationsById = new Map((unit.destinations ?? []).map((d) => [d.id, d]));
-  const processorIds = new Set((unit.processors ?? []).map((p) => p.id));
+  // Omitted: every component in config order. An empty array: nothing.
+  const refs = dedupe(
+    request.components ?? [
+      ...(unit.destinations ?? []).map((d) => ({ kind: 'destination' as const, id: d.id })),
+      ...(unit.processors ?? []).map((p) => ({ kind: 'processor' as const, id: p.id })),
+    ]
+  );
 
-  const outcomes = new Map<string, StreamsUnit.StatsResourceResult>();
-  const destinationRefs: StreamsUnit.StatsResourceRef[] = [];
-  const processorRefs: StreamsUnit.StatsResourceRef[] = [];
+  const destinations: Record<string, StreamsUnit.StatsDestinationResult> = {};
+  const processors: Record<string, StreamsUnit.StatsProcessorResult> = {};
+  const destinationIds: string[] = [];
+  const processorIds: string[] = [];
 
+  // Errors that come from the unit config only.
   for (const ref of refs) {
     if (ref.kind === 'destination') {
-      const destination = destinationsById.get(ref.id);
-      if (!destination) {
-        outcomes.set(refKey(ref), resultFor(ref, 'not_found'));
-      } else if (!DESTINATION_TYPES_WITH_STATS.includes(destination.type)) {
-        outcomes.set(refKey(ref), resultFor(ref, 'unsupported'));
+      const config = destinationConfigs.get(ref.id);
+      if (!config) {
+        destinations[ref.id] = {
+          ...noDestinationStats(bucketMs),
+          error: { code: 'not_found', reason: 'No destination with this id in the unit.' },
+        };
+      } else if (!DESTINATION_TYPES_WITH_STATS.includes(config.type)) {
+        destinations[ref.id] = {
+          ...noDestinationStats(bucketMs),
+          error: { code: 'unsupported', reason: 'Destination type does not emit stats.' },
+        };
       } else {
-        destinationRefs.push(ref);
+        destinations[ref.id] = noDestinationStats(bucketMs);
+        destinationIds.push(ref.id);
       }
-    } else if (!processorIds.has(ref.id)) {
-      outcomes.set(refKey(ref), resultFor(ref, 'not_found'));
+    } else if (!processorConfigs.has(ref.id)) {
+      processors[ref.id] = {
+        ...noProcessorStats(),
+        error: { code: 'not_found', reason: 'No processor with this id in the unit.' },
+      };
     } else {
-      processorRefs.push(ref);
+      processors[ref.id] = noProcessorStats();
+      processorIds.push(ref.id);
     }
   }
 
+  const finish = (
+    configHash: string | undefined,
+    error?: StreamsUnit.StatsError
+  ): StreamsUnit.StatsResponse => ({
+    ...(error ? { error } : {}),
+    components: { destinations, processors },
+    meta: { window, ...(configHash ? { config_hash: configHash } : {}) },
+  });
+
+  if (destinationIds.length === 0 && processorIds.length === 0) {
+    return finish(request.filter?.config_hash);
+  }
+
+  // Shared lookup. The hash (pinned or newest in the window), then the earliest
+  // start_timestamp for that hash over all time. A failure here is response-level.
   let configHash = request.filter?.config_hash;
-  const setAll = (group: StreamsUnit.StatsResourceRef[], status: string, reason?: string) => {
-    for (const ref of group) {
-      outcomes.set(refKey(ref), resultFor(ref, status, [], reason));
-    }
-  };
-
-  /** Runs one search for a group of refs and maps rows to results. Never throws. */
-  const runGroup = async (
-    group: StreamsUnit.StatsResourceRef[],
-    search: () => Promise<Map<string, StreamsUnit.StatsMetric[]>>
-  ) => {
-    try {
-      const rowsById = await search();
-      for (const ref of group) {
-        const rows = rowsById.get(ref.id);
-        outcomes.set(refKey(ref), resultFor(ref, rows ? 'ok' : 'no_data', rows ?? []));
-      }
-    } catch (error) {
-      logger.debug(`Unit stats query failed for unit [${unitId}]: ${(error as Error).message}`);
-      const { status, reason } = statusForSearchError(error);
-      setAll(group, status, reason);
-    }
-  };
-
-  const queryable = [...destinationRefs, ...processorRefs];
-
-  if (queryable.length > 0) {
-    try {
-      if (!configHash) {
-        const hashResponse = await esClient.search(buildConfigHashRequest({ unitId, window }));
-        configHash = readConfigHash(hashResponse);
-      }
-    } catch (error) {
-      logger.debug(
-        `Unit stats hash lookup failed for unit [${unitId}]: ${(error as Error).message}`
-      );
-      const { status, reason } = statusForSearchError(error);
-      setAll(queryable, status, reason);
-      configHash = undefined;
-      queryable.length = 0;
-    }
-  }
-
-  if (queryable.length > 0) {
+  let earliestStartMs: number | undefined;
+  try {
     if (!configHash) {
-      setAll(queryable, 'no_data');
-    } else {
-      const hash = configHash;
-      const searches: Array<Promise<void>> = [];
-
-      if (destinationRefs.length > 0) {
-        searches.push(
-          runGroup(destinationRefs, async () => {
-            const response = await esClient.search<unknown, DestinationStatsAggregations>(
-              buildDestinationStatsRequest({
-                unitId,
-                window,
-                ids: destinationRefs.map((ref) => ref.id),
-                configHash: hash,
-              })
-            );
-            return mapDestinationStatsResponse(response.aggregations);
-          })
-        );
-      }
-
-      // One search per distinct placement. Refs without a pipeline id share one search.
-      const byPipeline = new Map<string | undefined, StreamsUnit.StatsResourceRef[]>();
-      for (const ref of processorRefs) {
-        byPipeline.set(ref.pipeline_id, [...(byPipeline.get(ref.pipeline_id) ?? []), ref]);
-      }
-      for (const [pipelineId, group] of byPipeline) {
-        searches.push(
-          runGroup(group, async () => {
-            const response = await esClient.search<unknown, ProcessorStatsAggregations>(
-              buildProcessorStatsRequest({
-                unitId,
-                window,
-                ids: group.map((ref) => ref.id),
-                configHash: hash,
-                pipelineId,
-              })
-            );
-            return mapProcessorStatsResponse(response.aggregations);
-          })
-        );
-      }
-
-      await Promise.all(searches);
+      configHash = readLatestHash(
+        await esClient.search(buildLatestHashRequest({ unitId, window }))
+      );
     }
+    if (configHash) {
+      earliestStartMs = readEarliestStartMs(
+        await esClient.search(buildEarliestStartRequest({ unitId, configHash }))
+      );
+    }
+  } catch (error) {
+    logger.debug(`Unit stats lookup failed for unit [${unitId}]: ${(error as Error).message}`);
+    return finish(undefined, errorForSearchFailure(error, 'stats'));
   }
 
-  return {
-    results: refs.map((ref) => outcomes.get(refKey(ref)) ?? resultFor(ref, 'error')),
-    meta: {
-      window,
-      ...(configHash ? { config_hash: configHash } : {}),
-      sampled,
-      truncated: sample?.truncated ?? false,
-      limits: { max_resources: STREAMS_UNIT_STATS_MAX_RESOURCES },
-    },
+  // No hash, or no document for it: no data, no error.
+  if (!configHash || earliestStartMs === undefined) {
+    return finish(configHash);
+  }
+
+  // The data covers the window end minus the later of the window start and the first
+  // document of this config.
+  const seconds =
+    (Date.parse(window.end) - Math.max(Date.parse(window.start), earliestStartMs)) / 1000;
+  const hash = configHash;
+
+  const destinationSearch = async () => {
+    if (destinationIds.length === 0) return;
+    try {
+      const response = await esClient.search<unknown, DestinationStatsAggregations>(
+        buildDestinationStatsRequest({
+          unitId,
+          window,
+          ids: destinationIds,
+          configHash: hash,
+          bucketMs,
+        })
+      );
+      const mapped = mapDestinationStatsResponse({
+        aggregations: response.aggregations,
+        seconds,
+        bucketMs,
+      });
+      for (const id of destinationIds) {
+        // An id with no bucket is no data: the null result stays.
+        destinations[id] = mapped.get(id) ?? destinations[id];
+      }
+    } catch (error) {
+      logger.debug(`Destination stats failed for unit [${unitId}]: ${(error as Error).message}`);
+      const failure = errorForSearchFailure(error, 'destination stats');
+      for (const id of destinationIds) destinations[id] = { ...destinations[id], error: failure };
+    }
   };
+
+  const processorSearch = async () => {
+    if (processorIds.length === 0) return;
+    try {
+      const response = await esClient.search<unknown, ProcessorStatsAggregations>(
+        buildProcessorStatsRequest({ unitId, window, ids: processorIds, configHash: hash })
+      );
+      const mapped = mapProcessorStatsResponse({ aggregations: response.aggregations, seconds });
+      for (const id of processorIds) {
+        processors[id] = mapped.get(id) ?? processors[id];
+      }
+    } catch (error) {
+      logger.debug(`Processor stats failed for unit [${unitId}]: ${(error as Error).message}`);
+      const failure = errorForSearchFailure(error, 'processor stats');
+      for (const id of processorIds) processors[id] = { ...processors[id], error: failure };
+    }
+  };
+
+  // One search per kind, in parallel.
+  await Promise.all([destinationSearch(), processorSearch()]);
+
+  return finish(configHash);
 }

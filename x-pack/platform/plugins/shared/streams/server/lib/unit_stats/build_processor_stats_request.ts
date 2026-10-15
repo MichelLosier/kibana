@@ -8,52 +8,30 @@
 import type { estypes } from '@elastic/elasticsearch';
 import {
   DIRECTION_FIELD,
-  MAX_DIRECTION_BUCKETS,
-  MAX_OUTCOME_BUCKETS,
-  OUTCOME_FIELD,
-  PIPELINE_ID_FIELD,
-  STEP_BYTES_FIELD,
   STEP_DURATION_FIELD,
   STEP_ID_FIELD,
   STEP_ITEMS_FIELD,
   UNIT_STATS_QUERY_TIMEOUT,
   UNIT_STATS_STREAM,
 } from './constants';
-import { buildDurationAggregations } from './duration_stats';
 import { buildUnitFilter, type StatsWindow } from './resolve_config_hash';
 
-const byDirectionAndOutcome = (field: string): estypes.AggregationsAggregationContainer => ({
-  filter: { exists: { field } },
-  aggs: {
-    by_direction: {
-      terms: { field: DIRECTION_FIELD, size: MAX_DIRECTION_BUCKETS },
-      aggs: {
-        by_outcome: {
-          terms: { field: OUTCOME_FIELD, size: MAX_OUTCOME_BUCKETS },
-          aggs: { total: { sum: { field } } },
-        },
-      },
-    },
-  },
-});
-
 /**
- * One search for processor ids. Without `pipelineId` it sums over every
- * pipeline that carries the step. With it, the query filters on the compiled
- * pipeline id (for example `main-route-0`), not the authored one.
+ * One search for processor ids (telemetry calls them steps). It sums over every
+ * placement: no pipeline id filter. Items count the `in` direction, all outcomes.
+ * The duration is a `sum`, divided by the items sum in the mapper, so the average is
+ * per event and not per batch (`avg` would be per batch).
  */
 export const buildProcessorStatsRequest = ({
   unitId,
   window,
   ids,
   configHash,
-  pipelineId,
 }: {
   unitId: string;
   window: StatsWindow;
   ids: string[];
-  configHash?: string;
-  pipelineId?: string;
+  configHash: string;
 }): estypes.SearchRequest => ({
   index: UNIT_STATS_STREAM,
   ignore_unavailable: false,
@@ -66,7 +44,6 @@ export const buildProcessorStatsRequest = ({
       filter: [
         ...buildUnitFilter({ unitId, window, configHash }),
         { terms: { [STEP_ID_FIELD]: ids } },
-        ...(pipelineId ? [{ term: { [PIPELINE_ID_FIELD]: pipelineId } }] : []),
       ],
     },
   },
@@ -74,9 +51,21 @@ export const buildProcessorStatsRequest = ({
     by_id: {
       terms: { field: STEP_ID_FIELD, size: Math.max(ids.length, 1) },
       aggs: {
-        items: byDirectionAndOutcome(STEP_ITEMS_FIELD),
-        bytes: byDirectionAndOutcome(STEP_BYTES_FIELD),
-        ...buildDurationAggregations(STEP_DURATION_FIELD),
+        items_in: {
+          filter: {
+            bool: {
+              filter: [
+                { exists: { field: STEP_ITEMS_FIELD } },
+                { term: { [DIRECTION_FIELD]: 'in' } },
+              ],
+            },
+          },
+          aggs: { sum: { sum: { field: STEP_ITEMS_FIELD } } },
+        },
+        duration: {
+          filter: { exists: { field: STEP_DURATION_FIELD } },
+          aggs: { sum: { sum: { field: STEP_DURATION_FIELD } } },
+        },
       },
     },
   },

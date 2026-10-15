@@ -6,68 +6,78 @@
  */
 
 import type { StreamsUnit } from '@kbn/streams-schema';
-import { METRIC_UNITS } from './constants';
-import { mapDurationRows, type DurationBucket } from './duration_stats';
-
-interface SumBucket {
-  total?: { value: number | null };
-}
+import { RATE_UNIT } from './constants';
 
 interface DestinationBucket {
   key: string;
-  doc_count: number;
   items?: {
     doc_count: number;
-    by_outcome?: { buckets: Array<SumBucket & { key: string; doc_count: number }> };
+    sum?: { value: number | null };
+    series?: { buckets: Array<{ key: number; doc_count: number; sum?: { value: number | null } }> };
   };
-  bytes?: SumBucket & { doc_count: number };
-  duration?: DurationBucket;
+  duration?: { doc_count: number; average?: { value: number | null } };
 }
 
 export interface DestinationStatsAggregations {
   by_id?: { buckets: DestinationBucket[] };
 }
 
+export const noDestinationStats = (bucketMs: number): StreamsUnit.StatsDestinationResult => ({
+  latency: { average: { value: null } },
+  events: {
+    incoming: {
+      total: { value: null },
+      rate: { value: null, unit: RATE_UNIT },
+      series: { bucket_ms: bucketMs, points: [] },
+    },
+  },
+});
+
+/** Rate over the seconds the data covers. Null when there is no covered time. */
+export const toRate = (total: number, seconds: number | undefined): number | null =>
+  seconds !== undefined && seconds > 0 ? total / seconds : null;
+
 /**
- * Maps aggregation buckets to metric rows by destination id. An id with no
- * bucket, or a bucket with no rows, is absent from the result. The caller
- * turns that into `no_data`. The mapper never invents a zero.
+ * Maps aggregation buckets to results by destination id. A destination has data when
+ * an items document exists in the window. An id with no bucket is absent from the map,
+ * and the caller fills null values. The mapper never invents a zero. `total` is the sum
+ * of the points, so it always agrees with the bars.
  */
-export const mapDestinationStatsResponse = (
-  aggregations: DestinationStatsAggregations | undefined
-): Map<string, StreamsUnit.StatsMetric[]> => {
-  const rowsById = new Map<string, StreamsUnit.StatsMetric[]>();
+export const mapDestinationStatsResponse = ({
+  aggregations,
+  seconds,
+  bucketMs,
+}: {
+  aggregations: DestinationStatsAggregations | undefined;
+  seconds: number | undefined;
+  bucketMs: number;
+}): Map<string, StreamsUnit.StatsDestinationResult> => {
+  const results = new Map<string, StreamsUnit.StatsDestinationResult>();
 
   for (const bucket of aggregations?.by_id?.buckets ?? []) {
-    const rows: StreamsUnit.StatsMetric[] = [];
-
-    for (const outcome of bucket.items?.by_outcome?.buckets ?? []) {
-      if (outcome.doc_count > 0) {
-        rows.push({
-          name: 'items',
-          aggregation: 'sum',
-          value: outcome.total?.value ?? 0,
-          unit: METRIC_UNITS.items,
-          dimensions: { outcome: String(outcome.key) },
-        });
-      }
+    const result = noDestinationStats(bucketMs);
+    const duration = bucket.duration;
+    if (duration && duration.doc_count > 0 && typeof duration.average?.value === 'number') {
+      result.latency.average.value = duration.average.value;
     }
 
-    if (bucket.bytes && bucket.bytes.doc_count > 0) {
-      rows.push({
-        name: 'bytes',
-        aggregation: 'sum',
-        value: bucket.bytes.total?.value ?? 0,
-        unit: METRIC_UNITS.bytes,
-      });
+    if (bucket.items && bucket.items.doc_count > 0) {
+      const points = (bucket.items.series?.buckets ?? [])
+        .filter((point) => point.doc_count > 0)
+        .map((point) => ({
+          start: new Date(point.key).toISOString(),
+          value: point.sum?.value ?? 0,
+        }));
+      const total = points.reduce((sum, point) => sum + point.value, 0);
+      result.events.incoming = {
+        total: { value: total },
+        rate: { value: toRate(total, seconds), unit: RATE_UNIT },
+        series: { bucket_ms: bucketMs, points },
+      };
     }
 
-    rows.push(...mapDurationRows(bucket.duration));
-
-    if (rows.length > 0) {
-      rowsById.set(String(bucket.key), rows);
-    }
+    results.set(String(bucket.key), result);
   }
 
-  return rowsById;
+  return results;
 };

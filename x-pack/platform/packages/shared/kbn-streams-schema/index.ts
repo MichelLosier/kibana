@@ -9,8 +9,7 @@ export { Streams, streamDefinitionSchema } from './src/models/streams';
 export type * as StreamsV2 from './src/v2';
 export * as StreamsV2Examples from './src/v2/__examples__';
 export {
-  STREAMS_UNIT_STATS_KNOWN_STATUSES,
-  STREAMS_UNIT_STATS_MAX_RESOURCES,
+  STREAMS_UNIT_STATS_KNOWN_ERROR_CODES,
   collectUnitComponentIds,
   findDuplicateUnitComponentIds,
   streamsConfigEntrySchema,
@@ -24,14 +23,15 @@ export {
   streamsUnitResponseSchema,
   streamsUnitSchema,
   streamsUnitSecretsSchema,
+  streamsUnitStatsComponentRefSchema,
+  streamsUnitStatsDestinationResultSchema,
+  streamsUnitStatsErrorSchema,
   streamsUnitStatsFilterSchema,
   streamsUnitStatsMetaSchema,
-  streamsUnitStatsMetricSchema,
+  streamsUnitStatsProcessorResultSchema,
   streamsUnitStatsRequestSchema,
-  streamsUnitStatsResourceKindSchema,
-  streamsUnitStatsResourceRefSchema,
-  streamsUnitStatsResourceResultSchema,
   streamsUnitStatsResponseSchema,
+  streamsUnitStatsSeriesSchema,
   streamsUnitUiMetadataSchema,
   streamsUnitUpsertRequestSchema,
 } from './src/models/unit';

@@ -48,7 +48,8 @@ describe('POST /internal/streams/unit/{id}/_stats handler', () => {
         scopedClusterClient: { asCurrentUser: { search } },
       }),
     } as never);
-    expect(response.meta.sampled).toBe(true);
-    expect(response.results.map((result) => result.id)).toEqual(['es-prod']);
+    // `{}` means every component in the unit. The debug destination emits no stats.
+    expect(Object.keys(response.components.destinations)).toEqual(['es-prod']);
+    expect(response.components.destinations['es-prod'].error?.code).toBe('unsupported');
   });
 });

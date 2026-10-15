@@ -10,11 +10,12 @@ import type { ElasticsearchClient } from '@kbn/core/server';
 import { loggingSystemMock } from '@kbn/core-logging-server-mocks';
 import type { StreamsUnit } from '@kbn/streams-schema';
 import { buildDestinationStatsRequest } from './build_destination_stats_request';
+import { buildProcessorStatsRequest } from './build_processor_stats_request';
 import { UNIT_STATS_STREAM } from './constants';
 import { getUnitStats } from './get_unit_stats';
-import { buildProcessorStatsRequest } from './build_processor_stats_request';
-import { mapProcessorStatsResponse } from './map_processor_stats_response';
 import { mapDestinationStatsResponse } from './map_destination_stats_response';
+import { averageSecondsPerEvent, mapProcessorStatsResponse } from './map_processor_stats_response';
+import { getSeriesBucketMs } from './series_bucket';
 
 const unit: StreamsUnit.Configuration = {
   sources: [],
@@ -28,38 +29,51 @@ const unit: StreamsUnit.Configuration = {
 };
 
 const now = new Date('2026-10-14T12:00:00.000Z');
+const MINUTE = 60_000;
 
 const hashResponse = {
   hits: { hits: [{ fields: { 'resource.attributes.streams.config.hash': ['h1'] } }] },
 };
+// The config started 5 minutes before the window ends, so rates divide by 300 s.
+const earliestResponse = (ms: number | null) => ({ aggregations: { earliest: { value: ms } } });
+const fiveMinutesAgo = now.getTime() - 5 * MINUTE;
 
-const statsResponse = {
-  aggregations: {
-    by_id: {
-      buckets: [
-        {
-          key: 'es-prod',
-          doc_count: 10,
-          items: {
-            doc_count: 4,
-            by_outcome: {
-              buckets: [
-                { key: 'success', doc_count: 3, total: { value: 100 } },
-                { key: 'failure', doc_count: 1, total: { value: 2 } },
-              ],
-            },
+const destinationAggregations = {
+  by_id: {
+    buckets: [
+      {
+        key: 'es-prod',
+        items: {
+          doc_count: 6,
+          sum: { value: 30 },
+          series: {
+            buckets: [
+              { key: Date.parse('2026-10-14T11:56:00.000Z'), doc_count: 3, sum: { value: 20 } },
+              { key: Date.parse('2026-10-14T11:57:00.000Z'), doc_count: 3, sum: { value: 10 } },
+            ],
           },
-          bytes: { doc_count: 3, total: { value: 5000 } },
         },
-        {
-          // Documents exist for this id, but none carry a counter we read.
-          key: 'es-dev',
-          doc_count: 2,
-          items: { doc_count: 0, by_outcome: { buckets: [] } },
-          bytes: { doc_count: 0, total: { value: 0 } },
-        },
-      ],
-    },
+        duration: { doc_count: 6, average: { value: 0.107 } },
+      },
+      {
+        // Documents exist for this id but none carry items: no data.
+        key: 'es-dev',
+        items: { doc_count: 0, sum: { value: 0 }, series: { buckets: [] } },
+        duration: { doc_count: 0, average: { value: null } },
+      },
+    ],
+  },
+};
+
+const processorAggregations = {
+  by_id: {
+    buckets: [
+      {
+        key: 'uppercase-message',
+        items_in: { doc_count: 4, sum: { value: 35 } },
+        duration: { doc_count: 4, sum: { value: 0.001895 } },
+      },
+    ],
   },
 };
 
@@ -73,120 +87,190 @@ const run = (esClient: Partial<ElasticsearchClient>, request: StreamsUnit.StatsR
     now,
   });
 
-const responseError = (statusCode: number) =>
-  new errors.ResponseError({
-    statusCode,
-    body: {},
-    headers: {},
-    warnings: [],
-    meta: {} as never,
+/** Answers each search by its shape: hash, earliest start, destination or processor. */
+const makeSearch = (
+  overrides: { destination?: () => unknown; processor?: () => unknown; hash?: () => unknown } = {}
+) =>
+  jest.fn(async (body: { size?: number; aggs?: Record<string, unknown>; sort?: unknown }) => {
+    if (body.sort) return (overrides.hash ?? (() => hashResponse))();
+    if (body.aggs && 'earliest' in body.aggs) return earliestResponse(fiveMinutesAgo);
+    const by = (body.aggs?.by_id as { terms: { field: string } }).terms.field;
+    return by.includes('destination')
+      ? (overrides.destination ?? (() => ({ aggregations: destinationAggregations })))()
+      : (overrides.processor ?? (() => ({ aggregations: processorAggregations })))();
   });
 
-describe('buildDestinationStatsRequest', () => {
-  it('queries the exact stream with size 0 and filters by unit, window, hash and ids', () => {
+const responseError = (statusCode: number) =>
+  new errors.ResponseError({ statusCode, body: {}, headers: {}, warnings: [], meta: {} as never });
+
+describe('series bucket', () => {
+  it.each([
+    [15 * MINUTE, MINUTE],
+    [5 * MINUTE, 12_000],
+    [MINUTE, 10_000],
+    [3_600_000, MINUTE],
+    [86_400_000, 15 * MINUTE],
+  ])('range %p ms gives a %p ms bucket', (range, bucket) => {
+    expect(getSeriesBucketMs(range)).toBe(bucket);
+  });
+});
+
+describe('query builders', () => {
+  it('destination: exact stream, size 0, unit, window, hash and ids, date_histogram on the bucket', () => {
     const body = buildDestinationStatsRequest({
       unitId: 'default',
       window: { start: 'a', end: 'b' },
       ids: ['es-prod'],
       configHash: 'h1',
+      bucketMs: 60000,
     });
     expect(body.index).toBe(UNIT_STATS_STREAM);
     expect(body.size).toBe(0);
-    expect(JSON.stringify(body.query)).toContain('resource.attributes.unit.id');
-    expect(JSON.stringify(body.query)).toContain('resource.attributes.unit_id');
-    expect(JSON.stringify(body.query)).toContain('"h1"');
-    expect(JSON.stringify(body.query)).toContain('es-prod');
+    const text = JSON.stringify(body);
+    expect(text).toContain('resource.attributes.unit.id');
+    expect(text).toContain('resource.attributes.unit_id');
+    expect(text).toContain('"h1"');
+    expect(text).toContain('"fixed_interval":"60000ms"');
+    expect(text).not.toContain('outcome');
+  });
+
+  it('processor: direction in, no pipeline filter, a sum for the duration', () => {
+    const text = JSON.stringify(
+      buildProcessorStatsRequest({
+        unitId: 'default',
+        window: { start: 'a', end: 'b' },
+        ids: ['uppercase-message'],
+        configHash: 'h1',
+      })
+    );
+    expect(text).toContain('"attributes.direction":"in"');
+    expect(text).not.toContain('pipeline');
+    expect(text).not.toContain('outcome');
+    expect(text).toContain('"sum":{"field":"metrics.streams.step.duration"}');
+    expect(text).not.toContain('"avg"');
   });
 });
 
-describe('mapDestinationStatsResponse', () => {
-  it('emits no row for an empty metric and no entry for an id without rows', () => {
-    const rows = mapDestinationStatsResponse(statsResponse.aggregations);
-    expect(rows.get('es-prod')).toEqual([
-      {
-        name: 'items',
-        aggregation: 'sum',
-        value: 100,
-        unit: '{item}',
-        dimensions: { outcome: 'success' },
-      },
-      {
-        name: 'items',
-        aggregation: 'sum',
-        value: 2,
-        unit: '{item}',
-        dimensions: { outcome: 'failure' },
-      },
-      { name: 'bytes', aggregation: 'sum', value: 5000, unit: 'By' },
+describe('mappers', () => {
+  it('destination: total is the sum of the points and the rate uses the covered seconds', () => {
+    const mapped = mapDestinationStatsResponse({
+      aggregations: destinationAggregations,
+      seconds: 300,
+      bucketMs: MINUTE,
+    });
+    const prod = mapped.get('es-prod')!;
+    expect(prod.events.incoming.series.points).toEqual([
+      { start: '2026-10-14T11:56:00.000Z', value: 20 },
+      { start: '2026-10-14T11:57:00.000Z', value: 10 },
     ]);
-    expect(rows.has('es-dev')).toBe(false);
+    expect(prod.events.incoming.total.value).toBe(30);
+    expect(prod.events.incoming.rate).toEqual({ value: 0.1, unit: '{item}/s' });
+    expect(prod.latency.average.value).toBe(0.107);
+    const dev = mapped.get('es-dev')!;
+    expect(dev.events.incoming.total.value).toBeNull();
+    expect(dev.events.incoming.series).toEqual({ bucket_ms: MINUTE, points: [] });
+    expect(dev.latency.average.value).toBeNull();
+  });
+
+  it('processor: seconds per event, not per batch', () => {
+    // The live numbers: 0.001895 s over 35 items is 54.1 microseconds per event.
+    expect(averageSecondsPerEvent(0.001895, 35)).toBeCloseTo(0.0000541, 7);
+    expect(averageSecondsPerEvent(0.5, 0)).toBeNull();
+    expect(averageSecondsPerEvent(undefined, 5)).toBeNull();
+    const result = mapProcessorStatsResponse({
+      aggregations: processorAggregations,
+      seconds: 350,
+    }).get('uppercase-message')!;
+    expect(result.events.incoming.rate.value).toBeCloseTo(0.1);
+    expect(result.processing_duration.average.value).toBeCloseTo(0.0000541, 7);
   });
 });
 
 describe('getUnitStats', () => {
-  it('returns ok, no_data, not_found and unsupported per resource, in request order', async () => {
-    const search = jest
-      .fn()
-      .mockResolvedValueOnce(hashResponse)
-      .mockResolvedValueOnce(statsResponse);
-    const response = await run(
-      { search },
-      {
-        resources: [
-          { kind: 'destination', id: 'es-dev' },
-          { kind: 'destination', id: 'es-prod' },
-          { kind: 'destination', id: 'es-prod' },
-          { kind: 'destination', id: 'nope' },
-          { kind: 'destination', id: 'dbg' },
-        ],
-      }
-    );
-    expect(response.results.map((r) => [r.id, r.status])).toEqual([
-      ['es-dev', 'no_data'],
-      ['es-prod', 'ok'],
-      ['nope', 'not_found'],
-      ['dbg', 'unsupported'],
-    ]);
-    expect(response.meta).toMatchObject({
-      config_hash: 'h1',
-      sampled: false,
-      truncated: false,
-      window: { start: '2026-10-14T11:45:00.000Z', end: '2026-10-14T12:00:00.000Z' },
+  it('returns both maps, keyed by id, with data, no data, not_found and unsupported', async () => {
+    const search = makeSearch();
+    const response = await run({ search } as never, {
+      components: [
+        { kind: 'destination', id: 'es-dev' },
+        { kind: 'destination', id: 'es-prod' },
+        { kind: 'destination', id: 'es-prod' },
+        { kind: 'destination', id: 'nope' },
+        { kind: 'destination', id: 'dbg' },
+        { kind: 'processor', id: 'uppercase-message' },
+        { kind: 'processor', id: 'gone' },
+      ],
     });
-    expect(search).toHaveBeenCalledTimes(2);
-  });
-
-  it('skips the hash search when the request has a hash and echoes it', async () => {
-    const search = jest.fn().mockResolvedValue(statsResponse);
-    const response = await run(
-      { search },
-      { filter: { config_hash: 'mine' }, resources: [{ kind: 'destination', id: 'es-prod' }] }
-    );
-    expect(search).toHaveBeenCalledTimes(1);
-    expect(response.meta.config_hash).toBe('mine');
-  });
-
-  it('returns no_data and runs one search when no document exists', async () => {
-    const search = jest.fn().mockResolvedValue({ hits: { hits: [] } });
-    const response = await run({ search }, { resources: [{ kind: 'destination', id: 'es-prod' }] });
-    expect(response.results[0].status).toBe('no_data');
-    expect(response.meta.config_hash).toBeUndefined();
-    expect(search).toHaveBeenCalledTimes(1);
-  });
-
-  it('uses the default sample when resources are omitted and an empty list means nothing', async () => {
-    const search = jest.fn().mockResolvedValue({ hits: { hits: [] } });
-    const sample = await run({ search }, {});
-    expect(sample.meta.sampled).toBe(true);
-    expect(sample.results.map((r) => r.id)).toEqual([
-      'es-prod',
+    expect(response.error).toBeUndefined();
+    expect(Object.keys(response.components.destinations)).toEqual([
       'es-dev',
+      'es-prod',
+      'nope',
       'dbg',
-      'uppercase-message',
     ]);
-    const empty = await run({ search }, { resources: [] });
-    expect(empty.results).toEqual([]);
-    expect(empty.meta.sampled).toBe(false);
+    const d = response.components.destinations;
+    expect(d['es-prod'].events.incoming.total.value).toBe(30);
+    // The covered time is 300 s (the config started 5 minutes before the window end).
+    expect(d['es-prod'].events.incoming.rate.value).toBeCloseTo(0.1);
+    expect(d['es-dev'].error).toBeUndefined();
+    expect(d['es-dev'].events.incoming.rate.value).toBeNull();
+    expect(d.nope.error?.code).toBe('not_found');
+    expect(d.dbg.error?.code).toBe('unsupported');
+    expect(response.components.processors.gone.error?.code).toBe('not_found');
+    expect(response.components.processors['uppercase-message'].error).toBeUndefined();
+    expect(response.meta).toEqual({
+      window: { start: '2026-10-14T11:45:00.000Z', end: '2026-10-14T12:00:00.000Z' },
+      config_hash: 'h1',
+    });
+    // hash, earliest start, one destination search, one processor search.
+    expect(search).toHaveBeenCalledTimes(4);
+  });
+
+  it('uses the time_range, a pinned hash and skips the hash search', async () => {
+    const search = makeSearch();
+    const response = await run({ search } as never, {
+      filter: {
+        config_hash: 'mine',
+        time_range: { start: '2026-10-14T10:00:00.000Z', end: '2026-10-14T11:00:00.000Z' },
+      },
+      components: [{ kind: 'destination', id: 'es-prod' }],
+    });
+    // earliest start and one destination search. No hash search.
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(response.meta).toEqual({
+      window: { start: '2026-10-14T10:00:00.000Z', end: '2026-10-14T11:00:00.000Z' },
+      config_hash: 'mine',
+    });
+    expect(response.components.destinations['es-prod'].events.incoming.series.bucket_ms).toBe(
+      MINUTE
+    );
+  });
+
+  it('returns null values and no error when no hash is found or the hash matches nothing', async () => {
+    const none = await run(
+      { search: makeSearch({ hash: () => ({ hits: { hits: [] } }) }) } as never,
+      { components: [{ kind: 'destination', id: 'es-prod' }] }
+    );
+    expect(none.error).toBeUndefined();
+    expect(none.components.destinations['es-prod'].events.incoming.rate.value).toBeNull();
+
+    const search = jest.fn().mockResolvedValue(earliestResponse(null));
+    const pinned = await run({ search } as never, {
+      filter: { config_hash: 'nothing' },
+      components: [{ kind: 'destination', id: 'es-prod' }],
+    });
+    expect(pinned.error).toBeUndefined();
+    expect(pinned.components.destinations['es-prod'].events.incoming.series.points).toEqual([]);
+    expect(search).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns every component for an omitted list and nothing for an empty list', async () => {
+    const all = await run({ search: makeSearch() } as never, {});
+    expect(Object.keys(all.components.destinations)).toEqual(['es-prod', 'es-dev', 'dbg']);
+    expect(Object.keys(all.components.processors)).toEqual(['uppercase-message']);
+    const search = makeSearch();
+    const empty = await run({ search } as never, { components: [] });
+    expect(empty.components).toEqual({ destinations: {}, processors: {} });
+    expect(search).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -194,114 +278,42 @@ describe('getUnitStats', () => {
     [responseError(404), 'unavailable'],
     [new errors.TimeoutError('timeout', {} as never), 'unavailable'],
     [new Error('boom'), 'error'],
-  ])('maps a search failure to a status', async (error, status) => {
-    const search = jest.fn().mockRejectedValue(error);
-    const response = await run({ search }, { resources: [{ kind: 'destination', id: 'es-prod' }] });
-    expect(response.results[0].status).toBe(status);
-  });
-});
-
-const durationAgg = {
-  doc_count: 5,
-  avg: { value: 0.008 },
-  max: { value: 0.02 },
-  p95: { values: { '95.0': 0.015 } },
-};
-
-describe('duration rows', () => {
-  it('adds avg, max and p95 to destination rows and omits them when absent', () => {
-    const rows = mapDestinationStatsResponse({
-      by_id: {
-        buckets: [
-          { key: 'es-prod', doc_count: 1, duration: durationAgg },
-          { key: 'es-dev', doc_count: 1, duration: { doc_count: 0 } },
-        ],
-      },
-    });
-    expect(rows.get('es-prod')).toEqual([
-      { name: 'duration', aggregation: 'avg', value: 0.008, unit: 's' },
-      { name: 'duration', aggregation: 'max', value: 0.02, unit: 's' },
-      { name: 'duration', aggregation: 'p95', value: 0.015, unit: 's' },
-    ]);
-    expect(rows.has('es-dev')).toBe(false);
-  });
-});
-
-describe('processor stats', () => {
-  const processorAggregations = {
-    by_id: {
-      buckets: [
-        {
-          key: 'uppercase-message',
-          items: {
-            doc_count: 4,
-            by_direction: {
-              buckets: [
-                {
-                  key: 'in',
-                  by_outcome: { buckets: [{ key: 'success', doc_count: 2, total: { value: 10 } }] },
-                },
-                {
-                  key: 'out',
-                  by_outcome: { buckets: [{ key: 'success', doc_count: 2, total: { value: 9 } }] },
-                },
-              ],
-            },
-          },
-          bytes: { doc_count: 0 },
-          duration: durationAgg,
-        },
-      ],
-    },
-  };
-
-  it('maps direction and outcome dimensions, skips empty bytes and adds duration', () => {
-    const rows = mapProcessorStatsResponse(processorAggregations).get('uppercase-message');
-    expect(rows).toHaveLength(5);
-    expect(rows?.[0]).toEqual({
-      name: 'items',
-      aggregation: 'sum',
-      value: 10,
-      unit: '{item}',
-      dimensions: { direction: 'in', outcome: 'success' },
-    });
-    expect(rows?.some((row) => row.name === 'bytes')).toBe(false);
-  });
-
-  it('filters on the pipeline id only when one is given', () => {
-    const base = {
-      unitId: 'default',
-      window: { start: 'a', end: 'b' },
-      ids: ['uppercase-message'],
-    };
-    expect(JSON.stringify(buildProcessorStatsRequest(base).query)).not.toContain('pipeline.id');
-    expect(
-      JSON.stringify(buildProcessorStatsRequest({ ...base, pipelineId: 'main-route-0' }).query)
-    ).toContain('main-route-0');
-  });
-
-  it('returns ok, and runs one search per distinct placement', async () => {
-    const search = jest
-      .fn()
-      .mockResolvedValueOnce(hashResponse)
-      .mockResolvedValue({ aggregations: processorAggregations });
-    const response = await run(
-      { search },
-      {
-        resources: [
+  ])(
+    'puts a hash lookup failure on the response, with null entries and no entry errors',
+    async (error, code) => {
+      const response = await run({ search: jest.fn().mockRejectedValue(error) } as never, {
+        components: [
+          { kind: 'destination', id: 'es-prod' },
           { kind: 'processor', id: 'uppercase-message' },
-          { kind: 'processor', id: 'uppercase-message', pipeline_id: 'main' },
-          { kind: 'processor', id: 'missing' },
+        ],
+      });
+      expect(response.error?.code).toBe(code);
+      expect(response.error?.reason).not.toMatch(/\{|stack/);
+      expect(response.components.destinations['es-prod'].error).toBeUndefined();
+      expect(response.components.destinations['es-prod'].events.incoming.total.value).toBeNull();
+      expect(response.components.processors['uppercase-message'].error).toBeUndefined();
+    }
+  );
+
+  it('copies one kind search failure onto every component of that kind only', async () => {
+    const response = await run(
+      {
+        search: makeSearch({
+          processor: () => {
+            throw responseError(403);
+          },
+        }),
+      } as never,
+      {
+        components: [
+          { kind: 'destination', id: 'es-prod' },
+          { kind: 'processor', id: 'uppercase-message' },
         ],
       }
     );
-    expect(response.results.map((r) => [r.id, r.status])).toEqual([
-      ['uppercase-message', 'ok'],
-      ['uppercase-message', 'ok'],
-      ['missing', 'not_found'],
-    ]);
-    expect(response.results.map((r) => r.pipeline_id)).toEqual([undefined, 'main', undefined]);
-    // hash lookup, all pipelines, and one placement.
-    expect(search).toHaveBeenCalledTimes(3);
+    expect(response.error).toBeUndefined();
+    expect(response.components.processors['uppercase-message'].error?.code).toBe('forbidden');
+    expect(response.components.destinations['es-prod'].error).toBeUndefined();
+    expect(response.components.destinations['es-prod'].events.incoming.total.value).toBe(30);
   });
 });

@@ -177,79 +177,90 @@ export const streamsUnitUpsertRequestSchema = z.object({
   secrets: streamsUnitSecretsSchema.optional(),
 });
 
-/** Spike. Cap on resources per stats request. */
-export const STREAMS_UNIT_STATS_MAX_RESOURCES = 200;
-
-/** Request side. A closed enum is safe here: adding a value never breaks an old client. */
-export const streamsUnitStatsResourceKindSchema = z.enum(['destination', 'processor']);
-
-export const streamsUnitStatsResourceRefSchema = z.strictObject({
-  kind: streamsUnitStatsResourceKindSchema,
-  id: streamsUnitIdentifierSchema,
-  /** Optional placement. Omit it to sum over every pipeline that uses the processor. */
-  pipeline_id: streamsUnitIdentifierSchema.optional(),
-});
+/**
+ * Stats request. A component ref is a discriminated union on `kind`. Adding a kind is
+ * adding a member. `kind` is `processor` (the unit config key). Telemetry calls it a step.
+ */
+export const streamsUnitStatsComponentRefSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('destination'), id: streamsUnitIdentifierSchema }),
+  z.strictObject({ kind: z.literal('processor'), id: streamsUnitIdentifierSchema }),
+]);
 
 export const streamsUnitStatsFilterSchema = z.strictObject({
-  /** Omit for the latest config hash that the server observes in the window. */
+  /** Omit for the newest config hash that the server finds in the window. */
   config_hash: z.string().min(1).max(128).optional(),
+  /** Absolute range, ISO 8601. Both fields are required when present. No maximum for now. */
+  time_range: z
+    .strictObject({ start: z.iso.datetime(), end: z.iso.datetime() })
+    .refine(({ start, end }) => Date.parse(start) < Date.parse(end), {
+      message: 'time_range.start must be before time_range.end',
+    })
+    .optional(),
 });
 
 export const streamsUnitStatsRequestSchema = z.strictObject({
   filter: streamsUnitStatsFilterSchema.optional(),
-  /** Omit for the default sample. */
-  resources: z
-    .array(streamsUnitStatsResourceRefSchema)
-    .max(STREAMS_UNIT_STATS_MAX_RESOURCES)
-    .optional(),
+  /** Omit for every destination and processor in the unit. An empty array returns nothing. */
+  components: z.array(streamsUnitStatsComponentRefSchema).optional(),
 });
 
-/** Response side. Open strings everywhere. Do not use z.enum here. */
-export const streamsUnitStatsMetricSchema = z.object({
-  /** Metric name, scoped by resource kind. Example: "items". */
-  name: z.string(),
-  /** How the server computed the value. Example: "sum", "avg", "p95". */
-  aggregation: z.string(),
-  value: z.number(),
-  /** OTel unit string. Examples: "{item}", "By", "s". */
-  unit: z.string(),
-  /** Attributes that split this metric. Example: { outcome: "failure" }. */
-  dimensions: z.record(z.string(), z.string()).optional(),
+/** Response. Open strings for codes. A leaf is an object so it can gain fields. */
+export const streamsUnitStatsErrorSchema = z.object({
+  /** Open set. Known values are in STREAMS_UNIT_STATS_KNOWN_ERROR_CODES. */
+  code: z.string(),
+  /** Short. Holds no raw Elasticsearch body. */
+  reason: z.string(),
 });
 
-export const streamsUnitStatsResourceResultSchema = z.object({
-  kind: z.string(),
-  id: z.string(),
-  /** Echoed from the request when the client asked for one placement. */
-  pipeline_id: z.string().optional(),
-  /** Open set. Known values are in STREAMS_UNIT_STATS_KNOWN_STATUSES. */
-  status: z.string(),
-  error: z.object({ reason: z.string() }).optional(),
-  metrics: z.array(streamsUnitStatsMetricSchema),
+const statsValueSchema = z.object({ value: z.number().nullable() });
+const statsRateSchema = z.object({ value: z.number().nullable(), unit: z.string() });
+
+export const streamsUnitStatsSeriesSchema = z.object({
+  bucket_ms: z.number(),
+  points: z.array(z.object({ start: z.string(), value: z.number() })),
+});
+
+export const streamsUnitStatsDestinationResultSchema = z.object({
+  error: streamsUnitStatsErrorSchema.optional(),
+  /** Seconds per bulk request. */
+  latency: z.object({ average: statsValueSchema }),
+  events: z.object({
+    incoming: z.object({
+      total: statsValueSchema,
+      rate: statsRateSchema,
+      series: streamsUnitStatsSeriesSchema,
+    }),
+  }),
+});
+
+export const streamsUnitStatsProcessorResultSchema = z.object({
+  error: streamsUnitStatsErrorSchema.optional(),
+  /** Seconds per event. */
+  processing_duration: z.object({ average: statsValueSchema }),
+  events: z.object({ incoming: z.object({ rate: statsRateSchema }) }),
 });
 
 export const streamsUnitStatsMetaSchema = z.object({
   window: z.object({ start: z.string(), end: z.string() }),
   config_hash: z.string().optional(),
-  sampled: z.boolean().optional(),
-  truncated: z.boolean().optional(),
-  limits: z.record(z.string(), z.number()).optional(),
 });
 
 export const streamsUnitStatsResponseSchema = z.object({
-  results: z.array(streamsUnitStatsResourceResultSchema),
+  error: streamsUnitStatsErrorSchema.optional(),
+  components: z.object({
+    destinations: z.record(z.string(), streamsUnitStatsDestinationResultSchema),
+    processors: z.record(z.string(), streamsUnitStatsProcessorResultSchema),
+  }),
   meta: streamsUnitStatsMetaSchema,
 });
 
 /** Documentation for client authors. Never use it to narrow a response type. */
-export const STREAMS_UNIT_STATS_KNOWN_STATUSES = [
-  'ok',
-  'no_data',
-  'unavailable',
+export const STREAMS_UNIT_STATS_KNOWN_ERROR_CODES = [
   'forbidden',
-  'error',
-  'not_found',
+  'unavailable',
   'unsupported',
+  'not_found',
+  'error',
 ] as const;
 
 export const collectUnitComponentIds = (unit: StreamsUnit.Configuration): string[] => {
@@ -291,9 +302,11 @@ export namespace StreamsUnit {
   export type GetResponse = z.infer<typeof streamsUnitResponseSchema>;
   export type UpsertRequest = z.infer<typeof streamsUnitUpsertRequestSchema>;
   export type StatsRequest = z.infer<typeof streamsUnitStatsRequestSchema>;
-  export type StatsResourceRef = z.infer<typeof streamsUnitStatsResourceRefSchema>;
-  export type StatsMetric = z.infer<typeof streamsUnitStatsMetricSchema>;
-  export type StatsResourceResult = z.infer<typeof streamsUnitStatsResourceResultSchema>;
+  export type StatsComponentRef = z.infer<typeof streamsUnitStatsComponentRefSchema>;
+  export type StatsError = z.infer<typeof streamsUnitStatsErrorSchema>;
+  export type StatsSeries = z.infer<typeof streamsUnitStatsSeriesSchema>;
+  export type StatsDestinationResult = z.infer<typeof streamsUnitStatsDestinationResultSchema>;
+  export type StatsProcessorResult = z.infer<typeof streamsUnitStatsProcessorResultSchema>;
   export type StatsMeta = z.infer<typeof streamsUnitStatsMetaSchema>;
   export type StatsResponse = z.infer<typeof streamsUnitStatsResponseSchema>;
   export interface ConfigurationSavedObjectAttributes {
